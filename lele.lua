@@ -1,9 +1,8 @@
 --[[
     TELEPORT TO HIDER SCRIPT - PAINT AND SEEK
-    Dịch chuyển đến người chơi đang trốn
+    Chỉ dịch chuyển đến người đang trốn trong map
     Hỗ trợ: Delta Executor
     Game: Paint and Seek [CHRISTMAS]
-    Fix: GUI hiển thị ngay lập tức
 --]]
 
 -- Services
@@ -21,12 +20,10 @@ local Settings = {
         Enabled = false,
         AutoTeleport = false,
         TeleportDelay = 1,
-        TargetHiders = true,
-        TargetSeekers = false,
         AvoidTeam = true,
         UseTween = true,
         TweenSpeed = 0.3,
-        RandomTarget = true,
+        OnlyInGame = true, -- Chỉ dịch chuyển đến người trong map
     },
     Menu = {
         Keybind = Enum.KeyCode.Delete,
@@ -40,7 +37,8 @@ local Settings = {
 local TeleportConnection = nil
 local CurrentTarget = nil
 local HiderList = {}
-local SeekerList = {}
+local InGameHiderList = {} -- Người trốn thực sự trong map
+local LobbyList = {} -- Người ở sảnh
 local PlayerListGui = nil
 
 -- Tạo ScreenGui
@@ -55,7 +53,7 @@ local MainFrame
 local TargetInfoLabel
 local MinimizeButton
 
--- Hàm tạo thông báo (dùng TextLabel thay vì Drawing)
+-- Hàm tạo thông báo
 local function CreateNotification(text, duration)
     local notifGui = Instance.new("ScreenGui")
     notifGui.Name = "Notification"
@@ -179,10 +177,81 @@ local function CreateButton(parent, text, yPos, color, callback)
     return btn
 end
 
--- Phân loại người chơi
+-- Kiểm tra người chơi có đang trong map không (không ở sảnh)
+local function IsPlayerInGame(player)
+    local character = player.Character
+    if not character then return false end
+    
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    if not rootPart then return false end
+    
+    local position = rootPart.Position
+    
+    -- Các dấu hiệu người chơi đang ở sảnh:
+    -- 1. Vị trí Y rất cao (thường là spawn point trên trời)
+    -- 2. Đang ở gần vị trí spawn (thường là (0, 0, 0) hoặc vị trí cố định)
+    -- 3. Character không có animation hoặc đứng yên
+    -- 4. Có tag "Lobby" hoặc "Waiting" trong character
+    
+    -- Kiểm tra tag Lobby
+    if character:FindFirstChild("Lobby") or character:FindFirstChild("Waiting") then
+        return false
+    end
+    
+    -- Kiểm tra vị trí Y quá cao (sảnh thường ở trên cao)
+    if position.Y > 100 then
+        return false
+    end
+    
+    -- Kiểm tra nếu đang ở spawn point (0, 20, 0) hoặc gần đó
+    local spawnDistance = (position - Vector3.new(0, 20, 0)).Magnitude
+    if spawnDistance < 30 then
+        return false
+    end
+    
+    -- Kiểm tra vận tốc - nếu đứng yên quá lâu ở vị trí cao
+    local humanoid = character:FindFirstChild("Humanoid")
+    if humanoid then
+        local velocity = rootPart.Velocity
+        -- Nếu đứng yên hoàn toàn ở vị trí lạ
+        if velocity.Magnitude < 1 and position.Y > 50 then
+            return false
+        end
+    end
+    
+    -- Kiểm tra team - người trốn (Hider) thường có team khác với seeker
+    if player.Team then
+        local teamName = player.Team.Name:lower()
+        -- Nếu team chứa từ "lobby" hoặc "waiting"
+        if teamName:find("lobby") or teamName:find("wait") then
+            return false
+        end
+    end
+    
+    -- Kiểm tra player có đang thực sự "sống" trong game không
+    -- Một số game có folder "InGame" hoặc "Playing"
+    local gameFolder = Workspace:FindFirstChild("InGame") or Workspace:FindFirstChild("Playing")
+    if gameFolder then
+        local inGame = false
+        for _, obj in pairs(gameFolder:GetChildren()) do
+            if obj == character or obj == rootPart then
+                inGame = true
+                break
+            end
+        end
+        if not inGame then
+            return false
+        end
+    end
+    
+    return true
+end
+
+-- Phân loại người chơi (chỉ lấy người trốn trong map)
 local function ClassifyPlayers()
     HiderList = {}
-    SeekerList = {}
+    InGameHiderList = {}
+    LobbyList = {}
     
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
@@ -192,49 +261,40 @@ local function ClassifyPlayers()
                 local rootPart = character:FindFirstChild("HumanoidRootPart")
                 
                 if humanoid and humanoid.Health > 0 and rootPart then
+                    local playerData = {
+                        Player = player,
+                        Character = character,
+                        RootPart = rootPart,
+                        Position = rootPart.Position,
+                        Name = player.DisplayName or player.Name
+                    }
+                    
+                    -- Kiểm tra có phải người trốn không
+                    local isHider = false
+                    
                     if player.Team and LocalPlayer.Team then
-                        if player.Team ~= LocalPlayer.Team then
-                            table.insert(SeekerList, {
-                                Player = player,
-                                Character = character,
-                                RootPart = rootPart,
-                                Position = rootPart.Position,
-                                Name = player.DisplayName or player.Name
-                            })
-                        else
-                            table.insert(HiderList, {
-                                Player = player,
-                                Character = character,
-                                RootPart = rootPart,
-                                Position = rootPart.Position,
-                                Name = player.DisplayName or player.Name
-                            })
+                        -- Cùng team = đồng đội (cùng phe trốn)
+                        if player.Team == LocalPlayer.Team then
+                            isHider = true
                         end
                     else
-                        local isHiding = false
+                        -- Không có team, kiểm tra transparency
                         for _, part in pairs(character:GetChildren()) do
-                            if part:IsA("BasePart") and part.Transparency > 0.5 then
-                                isHiding = true
+                            if part:IsA("BasePart") and part.Transparency > 0.3 then
+                                isHider = true
                                 break
                             end
                         end
-                        
-                        if isHiding then
-                            table.insert(HiderList, {
-                                Player = player,
-                                Character = character,
-                                RootPart = rootPart,
-                                Position = rootPart.Position,
-                                Name = player.DisplayName or player.Name
-                            })
+                    end
+                    
+                    if isHider then
+                        -- Là người trốn, kiểm tra có trong map không
+                        if IsPlayerInGame(player) then
+                            table.insert(InGameHiderList, playerData)
+                            table.insert(HiderList, playerData)
                         else
-                            table.insert(SeekerList, {
-                                Player = player,
-                                Character = character,
-                                RootPart = rootPart,
-                                Position = rootPart.Position,
-                                Name = player.DisplayName or player.Name
-                            })
+                            table.insert(LobbyList, playerData)
+                            table.insert(HiderList, playerData)
                         end
                     end
                 end
@@ -242,96 +302,26 @@ local function ClassifyPlayers()
         end
     end
     
-    return HiderList, SeekerList
+    return InGameHiderList, HiderList, LobbyList
 end
 
--- Lấy mục tiêu ngẫu nhiên
-local function GetRandomTarget()
+-- Lấy mục tiêu ngẫu nhiên từ người trốn trong map
+local function GetRandomHider()
     ClassifyPlayers()
     
-    local targetList = {}
-    
-    if Settings.Teleport.TargetHiders then
-        for _, hider in pairs(HiderList) do
-            table.insert(targetList, hider)
-        end
-    end
-    
-    if Settings.Teleport.TargetSeekers then
-        for _, seeker in pairs(SeekerList) do
-            table.insert(targetList, seeker)
-        end
-    end
-    
-    if #targetList == 0 then
-        for _, player in pairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer then
-                local character = player.Character
-                if character then
-                    local rootPart = character:FindFirstChild("HumanoidRootPart")
-                    local humanoid = character:FindFirstChild("Humanoid")
-                    if rootPart and humanoid and humanoid.Health > 0 then
-                        if Settings.Teleport.AvoidTeam and 
-                           LocalPlayer.Team and player.Team == LocalPlayer.Team then
-                            continue
-                        end
-                        
-                        table.insert(targetList, {
-                            Player = player,
-                            Character = character,
-                            RootPart = rootPart,
-                            Position = rootPart.Position,
-                            Name = player.DisplayName or player.Name
-                        })
-                    end
-                end
-            end
-        end
-    end
-    
-    if #targetList == 0 then return nil end
-    
-    local randomIndex = math.random(1, #targetList)
-    return targetList[randomIndex]
-end
-
--- Lấy mục tiêu gần nhất
-local function GetNearestTarget()
-    ClassifyPlayers()
-    
-    local character = LocalPlayer.Character
-    if not character then return nil end
-    
-    local localRoot = character:FindFirstChild("HumanoidRootPart")
-    if not localRoot then return nil end
-    
-    local nearestTarget = nil
-    local nearestDistance = math.huge
-    
-    local targetList = {}
-    
-    if Settings.Teleport.TargetHiders then
-        for _, hider in pairs(HiderList) do
-            table.insert(targetList, hider)
-        end
-    end
-    
-    if Settings.Teleport.TargetSeekers then
-        for _, seeker in pairs(SeekerList) do
-            table.insert(targetList, seeker)
-        end
-    end
-    
-    for _, target in pairs(targetList) do
-        local distance = (localRoot.Position - target.Position).Magnitude
+    if #InGameHiderList == 0 then
+        -- Không có ai trong map, thử tìm lại
+        task.wait(0.5)
+        ClassifyPlayers()
         
-        if distance < nearestDistance then
-            nearestDistance = distance
-            nearestTarget = target
+        if #InGameHiderList == 0 then
+            CreateNotification("❌ Không tìm thấy người trốn trong map!", 2)
+            return nil
         end
     end
     
-    return nearestTarget
+    local randomIndex = math.random(1, #InGameHiderList)
+    return InGameHiderList[randomIndex]
 end
 
 -- Dịch chuyển đến mục tiêu
@@ -351,9 +341,9 @@ local function TeleportToTarget(target, useTween)
     
     local targetPos = target.RootPart.Position
     local offset = Vector3.new(
-        math.random(-2, 2),
+        math.random(-3, 3),
         0,
-        math.random(-2, 2)
+        math.random(-3, 3)
     )
     local finalPos = targetPos + offset
     
@@ -362,7 +352,7 @@ local function TeleportToTarget(target, useTween)
             rootPart.CFrame = CFrame.new(finalPos)
         end)
         
-        if (rootPart.Position - finalPos).Magnitude < 5 then
+        if (rootPart.Position - finalPos).Magnitude < 10 then
             CreateNotification("✅ Đã đến: " .. target.Name, 2)
             CurrentTarget = target
             UpdateTargetInfo()
@@ -395,7 +385,7 @@ local function TeleportToTarget(target, useTween)
         task.wait(0.1)
     end)
     
-    if (rootPart.Position - finalPos).Magnitude < 10 then
+    if (rootPart.Position - finalPos).Magnitude < 15 then
         CreateNotification("✅ Gần: " .. target.Name, 2)
         CurrentTarget = target
         UpdateTargetInfo()
@@ -412,17 +402,16 @@ local function UpdateTargetInfo()
     
     if TargetInfoLabel then
         local info = string.format(
-            "👤 Trốn: %d | 🔍 Tìm: %d | 🎯: %s",
-            #HiderList,
-            #SeekerList,
+            "🟢 Trốn trong map: %d\n🏠 Ở sảnh: %d | 🎯: %s",
+            #InGameHiderList,
+            #LobbyList,
             CurrentTarget and CurrentTarget.Name or "-"
         )
         TargetInfoLabel.Text = info
     end
     
     if MinimizeButton then
-        local totalPlayers = #HiderList + #SeekerList
-        MinimizeButton.Text = "🎯\n" .. totalPlayers
+        MinimizeButton.Text = "🎯\n" .. #InGameHiderList
     end
 end
 
@@ -431,12 +420,7 @@ local function AutoTeleportLoop()
     while Settings.Teleport.AutoTeleport do
         UpdateTargetInfo()
         
-        local target
-        if Settings.Teleport.RandomTarget then
-            target = GetRandomTarget()
-        else
-            target = GetNearestTarget()
-        end
+        local target = GetRandomHider()
         
         if target then
             TeleportToTarget(target, Settings.Teleport.UseTween)
@@ -575,8 +559,8 @@ function ShowPlayerList()
     end)
     
     local listFrame = Instance.new("Frame")
-    listFrame.Size = UDim2.new(0, 230, 0, 350)
-    listFrame.Position = UDim2.new(0.5, -115, 0.5, -175)
+    listFrame.Size = UDim2.new(0, 250, 0, 380)
+    listFrame.Position = UDim2.new(0.5, -125, 0.5, -190)
     listFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
     listFrame.BorderSizePixel = 0
     listFrame.Active = true
@@ -602,7 +586,7 @@ function ShowPlayerList()
     titleText.Size = UDim2.new(1, -40, 1, 0)
     titleText.Position = UDim2.new(0, 15, 0, 0)
     titleText.BackgroundTransparency = 1
-    titleText.Text = "👥 NGƯỜI CHƠI"
+    titleText.Text = "👥 NGƯỜI TRỐN (" .. #InGameHiderList .. ")"
     titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
     titleText.TextSize = 15
     titleText.TextXAlignment = Enum.TextXAlignment.Left
@@ -646,22 +630,23 @@ function ShowPlayerList()
     
     local ySize = 0
     
-    if #HiderList > 0 then
+    -- Người trốn trong map
+    if #InGameHiderList > 0 then
         local headerLabel = Instance.new("TextLabel")
         headerLabel.Size = UDim2.new(1, -5, 0, 22)
         headerLabel.BackgroundTransparency = 1
-        headerLabel.Text = "🟢 TRỐN (" .. #HiderList .. ")"
+        headerLabel.Text = "🟢 ĐANG TRỐN TRONG MAP (" .. #InGameHiderList .. ")"
         headerLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-        headerLabel.TextSize = 12
+        headerLabel.TextSize = 11
         headerLabel.TextXAlignment = Enum.TextXAlignment.Left
         headerLabel.Font = Enum.Font.GothamBold
         headerLabel.Parent = scrollFrame
         ySize = ySize + 26
         
-        for _, hider in pairs(HiderList) do
+        for _, hider in pairs(InGameHiderList) do
             local playerBtn = Instance.new("TextButton")
-            playerBtn.Size = UDim2.new(1, -5, 0, 30)
-            playerBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
+            playerBtn.Size = UDim2.new(1, -5, 0, 32)
+            playerBtn.BackgroundColor3 = Color3.fromRGB(35, 55, 35)
             playerBtn.BorderSizePixel = 0
             playerBtn.Text = "  🟢 " .. hider.Name
             playerBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -681,50 +666,55 @@ function ShowPlayerList()
                 UpdateTargetInfo()
             end)
             
-            ySize = ySize + 34
+            ySize = ySize + 36
         end
+    else
+        local noPlayerLabel = Instance.new("TextLabel")
+        noPlayerLabel.Size = UDim2.new(1, -5, 0, 30)
+        noPlayerLabel.BackgroundTransparency = 1
+        noPlayerLabel.Text = "❌ Không có người trốn trong map!"
+        noPlayerLabel.TextColor3 = Color3.fromRGB(255, 150, 150)
+        noPlayerLabel.TextSize = 12
+        noPlayerLabel.Font = Enum.Font.Gotham
+        noPlayerLabel.Parent = scrollFrame
+        ySize = ySize + 30
     end
     
-    if #SeekerList > 0 then
+    -- Người ở sảnh (không thể dịch chuyển)
+    if #LobbyList > 0 then
+        ySize = ySize + 10
         local headerLabel = Instance.new("TextLabel")
         headerLabel.Size = UDim2.new(1, -5, 0, 22)
         headerLabel.BackgroundTransparency = 1
-        headerLabel.Text = "🔴 TÌM (" .. #SeekerList .. ")"
-        headerLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
-        headerLabel.TextSize = 12
+        headerLabel.Text = "🏠 Ở SẢNH - KHÔNG THỂ DỊCH CHUYỂN (" .. #LobbyList .. ")"
+        headerLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
+        headerLabel.TextSize = 11
         headerLabel.TextXAlignment = Enum.TextXAlignment.Left
         headerLabel.Font = Enum.Font.GothamBold
         headerLabel.Parent = scrollFrame
         ySize = ySize + 26
         
-        for _, seeker in pairs(SeekerList) do
-            local playerBtn = Instance.new("TextButton")
-            playerBtn.Size = UDim2.new(1, -5, 0, 30)
-            playerBtn.BackgroundColor3 = Color3.fromRGB(55, 45, 45)
-            playerBtn.BorderSizePixel = 0
-            playerBtn.Text = "  🔴 " .. seeker.Name
-            playerBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            playerBtn.TextSize = 12
-            playerBtn.TextXAlignment = Enum.TextXAlignment.Left
-            playerBtn.Font = Enum.Font.Gotham
-            playerBtn.AutoButtonColor = false
-            playerBtn.Parent = scrollFrame
+        for _, lobbyPlayer in pairs(LobbyList) do
+            local playerLabel = Instance.new("TextLabel")
+            playerLabel.Size = UDim2.new(1, -5, 0, 25)
+            playerLabel.BackgroundColor3 = Color3.fromRGB(50, 45, 35)
+            playerLabel.BorderSizePixel = 0
+            playerLabel.Text = "  🏠 " .. lobbyPlayer.Name .. " (Sảnh)"
+            playerLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+            playerLabel.TextSize = 11
+            playerLabel.TextXAlignment = Enum.TextXAlignment.Left
+            playerLabel.Font = Enum.Font.Gotham
+            playerLabel.Parent = scrollFrame
             
-            local btnCorner = Instance.new("UICorner")
-            btnCorner.CornerRadius = UDim.new(0, 5)
-            btnCorner.Parent = playerBtn
+            local labelCorner = Instance.new("UICorner")
+            labelCorner.CornerRadius = UDim.new(0, 4)
+            labelCorner.Parent = playerLabel
             
-            playerBtn.MouseButton1Click:Connect(function()
-                TeleportToTarget(seeker, Settings.Teleport.UseTween)
-                ClosePlayerList()
-                UpdateTargetInfo()
-            end)
-            
-            ySize = ySize + 34
+            ySize = ySize + 29
         end
     end
     
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, ySize)
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, ySize + 10)
     
     local closeBtn = Instance.new("TextButton")
     closeBtn.Size = UDim2.new(1, -20, 0, 30)
@@ -757,7 +747,7 @@ local function CreateMenu()
     
     MainFrame = Instance.new("Frame")
     MainFrame.Name = "MainFrame"
-    MainFrame.Size = UDim2.new(0, 230, 0, 370)
+    MainFrame.Size = UDim2.new(0, 230, 0, 280)
     MainFrame.Position = Settings.Menu.Position
     MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
     MainFrame.BorderSizePixel = 0
@@ -817,20 +807,20 @@ local function CreateMenu()
     title.Size = UDim2.new(1, -70, 1, 0)
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "🎯 TELEPORT"
+    title.Text = "🎯 TELEPORT HIDER"
     title.TextColor3 = Color3.fromRGB(100, 255, 150)
-    title.TextSize = 15
+    title.TextSize = 14
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Font = Enum.Font.GothamBold
     title.Parent = titleBar
     
     -- Target Info
     TargetInfoLabel = Instance.new("TextLabel")
-    TargetInfoLabel.Size = UDim2.new(1, -16, 0, 22)
+    TargetInfoLabel.Size = UDim2.new(1, -16, 0, 35)
     TargetInfoLabel.Position = UDim2.new(0, 8, 0, 43)
     TargetInfoLabel.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
     TargetInfoLabel.BorderSizePixel = 0
-    TargetInfoLabel.Text = "👤 Trốn: 0 | 🔍 Tìm: 0 | 🎯: -"
+    TargetInfoLabel.Text = "🟢 Trong map: 0\n🏠 Sảnh: 0 | 🎯: -"
     TargetInfoLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
     TargetInfoLabel.TextSize = 11
     TargetInfoLabel.Font = Enum.Font.Gotham
@@ -841,33 +831,19 @@ local function CreateMenu()
     infoCorner.Parent = TargetInfoLabel
     
     -- Buttons
-    local btnY = 72
+    local btnY = 85
     
-    CreateButton(MainFrame, "🎲 Dịch chuyển ngẫu nhiên", btnY, 
+    CreateButton(MainFrame, "🎲 Dịch chuyển đến người trốn", btnY, 
         Color3.fromRGB(0, 180, 90), function()
-        local target = GetRandomTarget()
+        local target = GetRandomHider()
         if target then
             TeleportToTarget(target, Settings.Teleport.UseTween)
-        else
-            CreateNotification("❌ Không tìm thấy mục tiêu!", 2)
         end
     end)
     
     btnY = btnY + 38
     
-    CreateButton(MainFrame, "📍 Dịch chuyển gần nhất", btnY, 
-        Color3.fromRGB(0, 130, 180), function()
-        local target = GetNearestTarget()
-        if target then
-            TeleportToTarget(target, Settings.Teleport.UseTween)
-        else
-            CreateNotification("❌ Không tìm thấy mục tiêu!", 2)
-        end
-    end)
-    
-    btnY = btnY + 38
-    
-    CreateButton(MainFrame, "👥 Danh sách người chơi", btnY, 
+    CreateButton(MainFrame, "👥 Danh sách người trốn", btnY, 
         Color3.fromRGB(160, 120, 0), function()
         ShowPlayerList()
     end)
@@ -896,20 +872,6 @@ local function CreateMenu()
     
     btnY = btnY + 32
     
-    CreateToggle(MainFrame, "🎯 Nhắm người trốn", btnY, 
-        Settings.Teleport.TargetHiders, function(state)
-        Settings.Teleport.TargetHiders = state
-    end)
-    
-    btnY = btnY + 32
-    
-    CreateToggle(MainFrame, "🔍 Nhắm người tìm", btnY, 
-        Settings.Teleport.TargetSeekers, function(state)
-        Settings.Teleport.TargetSeekers = state
-    end)
-    
-    btnY = btnY + 32
-    
     CreateToggle(MainFrame, "🚫 Tránh đồng đội", btnY, 
         Settings.Teleport.AvoidTeam, function(state)
         Settings.Teleport.AvoidTeam = state
@@ -917,14 +879,7 @@ local function CreateMenu()
     
     btnY = btnY + 32
     
-    CreateToggle(MainFrame, "🎲 Ngẫu nhiên", btnY, 
-        Settings.Teleport.RandomTarget, function(state)
-        Settings.Teleport.RandomTarget = state
-    end)
-    
-    btnY = btnY + 32
-    
-    CreateToggle(MainFrame, "✨ Mượt", btnY, 
+    CreateToggle(MainFrame, "✨ Dịch chuyển mượt", btnY, 
         Settings.Teleport.UseTween, function(state)
         Settings.Teleport.UseTween = state
     end)
@@ -939,11 +894,11 @@ local function CreateMenu()
     return MenuGui
 end
 
--- Khởi tạo tất cả GUI
+-- Khởi tạo GUI
 print("Đang tạo GUI...")
 MenuGui = CreateMenu()
 MinimizeButton = CreateMinimizedIcon()
-print("GUI đã được tạo thành công!")
+print("GUI đã tạo thành công!")
 
 -- Cập nhật info
 coroutine.wrap(function()
@@ -982,13 +937,14 @@ LocalPlayer.OnTeleport:Connect(function()
     if MenuGui then MenuGui:Destroy() end
 end)
 
--- Thông báo khi load thành công
+-- Thông báo load
 task.wait(0.5)
-CreateNotification("🎯 Teleport Loaded! [Delete] Menu", 3)
+CreateNotification("🎯 Teleport Hider Loaded! [Delete] Menu", 3)
 
 print("=================================")
-print("🎯 TELEPORT SCRIPT LOADED!")
+print("🎯 TELEPORT HIDER SCRIPT LOADED!")
+print("✅ Chỉ dịch chuyển đến người trốn trong map")
+print("❌ Không dịch chuyển đến người ở sảnh")
+print("❌ Không dịch chuyển đến đồng đội tìm")
 print("📋 Delete = Thu nhỏ/Mở Menu")
-print("🖱️ Click icon = Mở menu")
-print("❌ ESC = Tắt danh sách")
 print("=================================")

@@ -1,9 +1,8 @@
 --[[
     ESP SCRIPT - PAINT AND SEEK
     Chỉ ESP người đang trốn trong map
-    Hiển thị: Box + Khoảng cách
+    Box + Khoảng cách
     Hỗ trợ: Delta Executor
-    Fix: Tắt/Bật không bị lỗi
 --]]
 
 -- Services
@@ -21,26 +20,22 @@ local Settings = {
         Box = true,
         BoxColor = Color3.fromRGB(255, 50, 50),
         BoxThickness = 2,
-        BoxTransparency = 1,
         Distance = true,
         DistanceColor = Color3.fromRGB(255, 255, 255),
         DistanceSize = 14,
         MaxDistance = 500,
         OnlyInGame = true,
         OnlyHiders = true,
-        RefreshRate = 0 -- 0 = mỗi frame
     },
     Menu = {
         Keybind = Enum.KeyCode.Delete,
         Visible = true,
         Minimized = false,
-        Position = UDim2.new(0, 10, 0, 50)
     }
 }
 
 -- ESP Data
 local ESPData = {}
-local Connections = {}
 
 -- Tạo ScreenGui
 local ScreenGui = Instance.new("ScreenGui")
@@ -132,7 +127,6 @@ local function CreateToggle(parent, text, yPos, default, callback)
     end)
     
     return {
-        Button = btn,
         GetState = function() return state end,
         SetState = function(s)
             state = s
@@ -155,23 +149,19 @@ local function IsPlayerInGame(player)
     
     local position = rootPart.Position
     
-    -- Kiểm tra tag
     if character:FindFirstChild("Lobby") or character:FindFirstChild("Waiting") then
         return false
     end
     
-    -- Vị trí Y quá cao
     if position.Y > 100 then
         return false
     end
     
-    -- Gần spawn point
     local spawnDistance = (position - Vector3.new(0, 20, 0)).Magnitude
     if spawnDistance < 30 then
         return false
     end
     
-    -- Team lobby
     if player.Team then
         local teamName = player.Team.Name:lower()
         if teamName:find("lobby") or teamName:find("wait") then
@@ -187,15 +177,12 @@ local function IsHider(player)
     local character = player.Character
     if not character then return false end
     
-    -- Kiểm tra team
     if player.Team and LocalPlayer.Team then
-        -- Cùng team với local player = người trốn
         if player.Team == LocalPlayer.Team then
             return true
         end
     end
     
-    -- Kiểm tra transparency (người trốn thường trong suốt)
     for _, part in pairs(character:GetChildren()) do
         if part:IsA("BasePart") and part.Transparency > 0.3 then
             return true
@@ -219,13 +206,11 @@ local function RemoveESP(player)
     local data = ESPData[player]
     if not data then return end
     
-    -- Ngắt connection
     if data.Connection then
         data.Connection:Disconnect()
         data.Connection = nil
     end
     
-    -- Xóa drawing objects
     if data.Box then
         pcall(function() data.Box:Destroy() end)
         data.Box = nil
@@ -254,12 +239,23 @@ local function ClearAllESP()
     ESPData = {}
 end
 
+-- Refresh tất cả ESP
+local function RefreshAllESP()
+    ClearAllESP()
+    
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            CreateESP(player)
+        end
+    end
+    
+    UpdatePlayerCount()
+end
+
 -- Tạo ESP cho một player
-local function CreateESP(player)
-    -- Xóa ESP cũ nếu có
+function CreateESP(player)
     RemoveESP(player)
     
-    -- Kiểm tra player có hợp lệ không
     if player == LocalPlayer then return end
     
     local character = player.Character
@@ -271,7 +267,6 @@ local function CreateESP(player)
     
     if not rootPart or not head or not humanoid then return end
     
-    -- Khởi tạo data
     ESPData[player] = {
         Box = nil,
         DistanceTag = nil,
@@ -284,7 +279,7 @@ local function CreateESP(player)
         box.Visible = false
         box.Color = Settings.ESP.BoxColor
         box.Thickness = Settings.ESP.BoxThickness
-        box.Transparency = Settings.ESP.BoxTransparency
+        box.Transparency = 1
         box.Filled = false
         box.ZIndex = 1
         ESPData[player].Box = box
@@ -416,22 +411,7 @@ local function CreateESP(player)
     ESPData[player].Connection = connection
 end
 
--- Refresh tất cả ESP
-local function RefreshAllESP()
-    -- Xóa tất cả ESP hiện tại
-    ClearAllESP()
-    
-    -- Tạo lại ESP cho tất cả player hợp lệ
-    for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer and player.Character then
-            CreateESP(player)
-        end
-    end
-    
-    UpdatePlayerCount()
-end
-
--- Cập nhật số lượng người chơi
+-- Cập nhật số lượng
 local function UpdatePlayerCount()
     local inGameCount = 0
     local totalHiders = 0
@@ -460,29 +440,6 @@ local function UpdatePlayerCount()
     if MinimizeButton then
         MinimizeButton.Text = "👁\n" .. inGameCount
     end
-end
-
--- Player Added
-local function OnPlayerAdded(player)
-    if player == LocalPlayer then return end
-    
-    local function OnCharacterAdded(character)
-        task.wait(0.3)
-        if Settings.ESP.Enabled then
-            CreateESP(player)
-        end
-    end
-    
-    if player.Character then
-        OnCharacterAdded(player.Character)
-    end
-    
-    player.CharacterAdded:Connect(OnCharacterAdded)
-end
-
--- Player Removing
-local function OnPlayerRemoving(player)
-    RemoveESP(player)
 end
 
 -- Thu nhỏ menu
@@ -562,8 +519,8 @@ local function CreateMenu()
     
     MainFrame = Instance.new("Frame")
     MainFrame.Name = "MainFrame"
-    MainFrame.Size = UDim2.new(0, 220, 0, 260)
-    MainFrame.Position = Settings.Menu.Position
+    MainFrame.Size = UDim2.new(0, 220, 0, 220)
+    MainFrame.Position = UDim2.new(0, 10, 0, 50)
     MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
     MainFrame.BorderSizePixel = 0
     MainFrame.Active = true
@@ -631,7 +588,7 @@ local function CreateMenu()
     
     -- Player Count
     PlayerCountLabel = Instance.new("TextLabel")
-    PlayerCountLabel.Size = UDim2.new(1, -16, 0, 30)
+    PlayerCountLabel.Size = UDim2.new(1, -16, 0, 25)
     PlayerCountLabel.Position = UDim2.new(0, 8, 0, 43)
     PlayerCountLabel.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
     PlayerCountLabel.BorderSizePixel = 0
@@ -646,45 +603,39 @@ local function CreateMenu()
     infoCorner.Parent = PlayerCountLabel
     
     -- Toggles
-    local btnY = 80
+    local btnY = 75
     
-    CreateToggle(MainFrame, "👁 ESP Enabled", btnY, 
+    CreateToggle(MainFrame, "👁 ESP", btnY, 
         Settings.ESP.Enabled, function(state)
         Settings.ESP.Enabled = state
         if state then
-            -- Bật lại ESP - tạo mới tất cả
             RefreshAllESP()
-            CreateNotification("✅ ESP đã bật!", 1.5)
         else
-            -- Tắt ESP - ẩn tất cả
             for _, data in pairs(ESPData) do
                 if data.Box then data.Box.Visible = false end
                 if data.DistanceTag then data.DistanceTag.Visible = false end
             end
-            CreateNotification("❌ ESP đã tắt!", 1.5)
         end
     end)
     
-    btnY = btnY + 35
+    btnY = btnY + 33
     
-    CreateToggle(MainFrame, "📦 Hiện Box", btnY, 
+    CreateToggle(MainFrame, "📦 Box", btnY, 
         Settings.ESP.Box, function(state)
         Settings.ESP.Box = state
-        -- Cập nhật visibility ngay lập tức
         for _, data in pairs(ESPData) do
             if data.Box then
                 data.Box.Visible = state and Settings.ESP.Enabled
             end
         end
-        -- Nếu bật lại và ESP đang enabled, refresh
         if state and Settings.ESP.Enabled then
             RefreshAllESP()
         end
     end)
     
-    btnY = btnY + 35
+    btnY = btnY + 33
     
-    CreateToggle(MainFrame, "📏 Hiện Khoảng cách", btnY, 
+    CreateToggle(MainFrame, "📏 Khoảng cách", btnY, 
         Settings.ESP.Distance, function(state)
         Settings.ESP.Distance = state
         for _, data in pairs(ESPData) do
@@ -697,7 +648,7 @@ local function CreateMenu()
         end
     end)
     
-    btnY = btnY + 35
+    btnY = btnY + 33
     
     CreateToggle(MainFrame, "🎯 Chỉ người trốn", btnY, 
         Settings.ESP.OnlyHiders, function(state)
@@ -707,7 +658,7 @@ local function CreateMenu()
         end
     end)
     
-    btnY = btnY + 35
+    btnY = btnY + 33
     
     CreateToggle(MainFrame, "🗺️ Chỉ trong map", btnY, 
         Settings.ESP.OnlyInGame, function(state)
@@ -717,37 +668,14 @@ local function CreateMenu()
         end
     end)
     
-    btnY = btnY + 45
-    
-    -- Nút thu nhỏ
-    local minimizeBtn = Instance.new("TextButton")
-    minimizeBtn.Size = UDim2.new(1, -16, 0, 30)
-    minimizeBtn.Position = UDim2.new(0, 8, 0, btnY)
-    minimizeBtn.BackgroundColor3 = Color3.fromRGB(220, 130, 40)
-    minimizeBtn.BorderSizePixel = 0
-    minimizeBtn.Text = "📌 Thu nhỏ menu"
-    minimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    minimizeBtn.TextSize = 13
-    minimizeBtn.Font = Enum.Font.GothamBold
-    minimizeBtn.AutoButtonColor = false
-    minimizeBtn.Parent = MainFrame
-    
-    local btnCorner = Instance.new("UICorner")
-    btnCorner.CornerRadius = UDim.new(0, 5)
-    btnCorner.Parent = minimizeBtn
-    
-    minimizeBtn.MouseButton1Click:Connect(function()
-        MinimizeMenu()
-    end)
-    
     return MenuGui
 end
 
 -- Khởi tạo
-print("Đang tạo ESP GUI...")
+print("Đang tạo ESP...")
 MenuGui = CreateMenu()
 MinimizeButton = CreateMinimizedIcon()
-print("ESP GUI đã tạo!")
+print("ESP đã tạo!")
 
 -- Tạo ESP cho tất cả player hiện tại
 for _, player in pairs(Players:GetPlayers()) do
@@ -756,9 +684,28 @@ for _, player in pairs(Players:GetPlayers()) do
     end
 end
 
--- Kết nối sự kiện
-Players.PlayerAdded:Connect(OnPlayerAdded)
-Players.PlayerRemoving:Connect(OnPlayerRemoving)
+-- Player Added
+Players.PlayerAdded:Connect(function(player)
+    if player == LocalPlayer then return end
+    
+    local function OnCharacterAdded(character)
+        task.wait(0.3)
+        if Settings.ESP.Enabled then
+            CreateESP(player)
+        end
+    end
+    
+    if player.Character then
+        OnCharacterAdded(player.Character)
+    end
+    
+    player.CharacterAdded:Connect(OnCharacterAdded)
+end)
+
+-- Player Removing
+Players.PlayerRemoving:Connect(function(player)
+    RemoveESP(player)
+end)
 
 -- Cập nhật player count
 coroutine.wrap(function()
@@ -799,9 +746,9 @@ task.wait(0.5)
 CreateNotification("👁 ESP Hider Loaded! [Delete] Menu", 3)
 
 print("=================================")
-print("👁 ESP HIDER SCRIPT LOADED!")
-print("✅ Chỉ ESP người trốn trong map")
-print("✅ Box + Khoảng cách")
+print("👁 ESP HIDER LOADED!")
+print("✅ Box đỏ + Khoảng cách")
+print("✅ Chỉ người trốn trong map")
 print("✅ Tắt/Bật không lỗi")
-print("📋 Delete = Thu nhỏ/Mở Menu")
+print("📋 Delete = Menu")
 print("=================================")

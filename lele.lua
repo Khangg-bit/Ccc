@@ -1,9 +1,9 @@
 --[[
-    AUTO STOP TIMER - Roblox Script
-    Game: Dừng bộ đếm thời gian (Stop the Timer)
-    Tự động quét màn hình, bấm nút bắt đầu và dừng chính xác
-    Hỗ trợ Delta Executor
-]]
+    AUTO STOP TIMER - FIXED
+    Quét chính xác số giây mục tiêu
+    Game: Dừng bộ đếm thời gian / Stop the Timer
+    Delta Executor
+--]]
 
 -- Services
 local Players = game:GetService("Players")
@@ -12,22 +12,25 @@ local CoreGui = game:GetService("CoreGui")
 local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
 
 -- Settings
 local Settings = {
-    Auto = false,               -- Bật/tắt tự động
-    Target = 0,                 -- Thời gian mục tiêu (tự động quét)
-    Offset = 0.02,              -- Bấm trước khi đến đích một chút (giây)
-    ScanInterval = 2,           -- Thời gian quét lại màn hình (giây)
+    Auto = false,
+    Target = 0,
+    Offset = 0.03,        -- Bấm trước 0.03s để bù lag
     Status = "Đang chờ...",
 }
 
--- Biến lưu trữ UI elements tìm thấy
-local StartButton = nil
-local TimerLabel = nil
-local TargetLabel = nil
+-- Các thành phần UI của game đã tìm thấy
+local GameUI = {
+    TargetLabel = nil,     -- Nhãn hiển thị số giây mục tiêu
+    TimerLabel = nil,      -- Nhãn đồng hồ đếm
+    StopButton = nil,      -- Nút dừng (màu đỏ)
+    StartButton = nil,     -- Nút bắt đầu
+}
 
--- GUI
+-- GUI của script
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "AutoStopTimer"
 ScreenGui.Parent = CoreGui
@@ -40,24 +43,21 @@ local TargetDisplayLabel
 local TimerDisplayLabel
 local AutoToggle
 
--- Hàm tạo thông báo nhỏ
+-- Notify
 local function Notify(text, duration)
     local gui = Instance.new("ScreenGui")
     gui.Name = "Notification"
     gui.Parent = CoreGui
     gui.ResetOnSpawn = false
-
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(0, 280, 0, 36)
     frame.Position = UDim2.new(0.5, -140, 0, 10)
     frame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
     frame.BorderSizePixel = 0
     frame.Parent = gui
-
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, 8)
     corner.Parent = frame
-
     local text = Instance.new("TextLabel")
     text.Size = UDim2.new(1, 0, 1, 0)
     text.BackgroundTransparency = 1
@@ -66,13 +66,12 @@ local function Notify(text, duration)
     text.TextSize = 14
     text.Font = Enum.Font.GothamBold
     text.Parent = frame
-
     task.delay(duration or 2, function()
         pcall(function() gui:Destroy() end)
     end)
 end
 
--- Hàm tạo Toggle
+-- Tạo Toggle
 local function CreateToggle(parent, text, yPos, default, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -16, 0, 28)
@@ -130,7 +129,7 @@ local function CreateToggle(parent, text, yPos, default, callback)
     }
 end
 
--- Hàm tạo Button
+-- Tạo Button
 local function CreateButton(parent, text, yPos, color, callback)
     local btn = Instance.new("TextButton")
     btn.Size = UDim2.new(1, -16, 0, 30)
@@ -154,135 +153,13 @@ local function CreateButton(parent, text, yPos, color, callback)
     return btn
 end
 
--- Quét toàn bộ PlayerGui để tìm các thành phần cần thiết
-local function ScanScreen()
-    StartButton = nil
-    TimerLabel = nil
-    TargetLabel = nil
-
-    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
-    if not playerGui then
-        Settings.Status = "Chưa vào game (PlayerGui)"
-        return false
-    end
-
-    -- 1. Tìm nút Start/Stop
-    -- Thường là TextButton màu đỏ, chữ "Start", "Stop", "Click to start", ...
-    local buttons = {}
-    for _, obj in pairs(playerGui:GetDescendants()) do
-        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-            local text = ""
-            if obj:IsA("TextButton") then
-                text = obj.Text:lower()
-            else
-                -- ImageButton có thể có TextLabel con
-                local childText = obj:FindFirstChildWhichIsA("TextLabel")
-                if childText then text = childText.Text:lower() end
-            end
-            if text:find("start") or text:find("stop") or text:find("click") then
-                table.insert(buttons, obj)
-            end
-        end
-    end
-    -- Nếu không tìm thấy bằng text, thử tìm nút lớn nhất
-    if #buttons == 0 then
-        local maxSize = 0
-        for _, obj in pairs(playerGui:GetDescendants()) do
-            if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-                local size = obj.AbsoluteSize.X * obj.AbsoluteSize.Y
-                if size > maxSize then
-                    maxSize = size
-                    StartButton = obj
-                end
-            end
-        end
-    else
-        -- Chọn nút có kích thước lớn nhất trong số tìm thấy
-        local maxSize = 0
-        for _, btn in pairs(buttons) do
-            local size = btn.AbsoluteSize.X * btn.AbsoluteSize.Y
-            if size > maxSize then
-                maxSize = size
-                StartButton = btn
-            end
-        end
-    end
-
-    -- 2. Tìm nhãn thời gian mục tiêu (chứa "stop", "target", "goal", "at:")
-    for _, obj in pairs(playerGui:GetDescendants()) do
-        if obj:IsA("TextLabel") then
-            local text = obj.Text:lower()
-            if text:find("stop at") or text:find("target") or text:find("goal") or text:find("at:") then
-                -- Trích xuất số từ chuỗi
-                local num = tonumber(text:match("%d+%.?%d*"))
-                if num then
-                    TargetLabel = obj
-                    Settings.Target = num
-                    break
-                end
-            end
-        end
-    end
-
-    -- Nếu không tìm thấy, thử tìm nhãn chứa số duy nhất (có thể là target)
-    if not TargetLabel then
-        for _, obj in pairs(playerGui:GetDescendants()) do
-            if obj:IsA("TextLabel") then
-                local num = tonumber(obj.Text)
-                if num and num > 0 then
-                    TargetLabel = obj
-                    Settings.Target = num
-                    break
-                end
-            end
-        end
-    end
-
-    -- 3. Tìm nhãn thời gian hiện tại (timer)
-    -- Thường là TextLabel hiển thị số kiểu "0.00" và cập nhật liên tục, font size lớn
-    local candidates = {}
-    for _, obj in pairs(playerGui:GetDescendants()) do
-        if obj:IsA("TextLabel") then
-            local num = tonumber(obj.Text)
-            if num and obj.Text:match("%d+%.%d%d") then
-                table.insert(candidates, obj)
-            end
-        end
-    end
-    if #candidates > 0 then
-        -- Chọn nhãn có font size lớn nhất (vì timer thường to)
-        local maxFont = 0
-        for _, lbl in pairs(candidates) do
-            if lbl.TextSize > maxFont and lbl ~= TargetLabel then
-                maxFont = lbl.TextSize
-                TimerLabel = lbl
-            end
-        end
-    end
-
-    -- Cập nhật trạng thái
-    if StartButton and TimerLabel and TargetLabel then
-        Settings.Status = "✅ Quét thành công"
-        UpdateDisplay()
-        return true
-    else
-        local missing = {}
-        if not StartButton then table.insert(missing, "nút") end
-        if not TimerLabel then table.insert(missing, "đồng hồ") end
-        if not TargetLabel then table.insert(missing, "mục tiêu") end
-        Settings.Status = "❌ Thiếu: " .. table.concat(missing, ", ")
-        UpdateDisplay()
-        return false
-    end
-end
-
--- Cập nhật hiển thị GUI
+-- Cập nhật hiển thị
 function UpdateDisplay()
     if TargetDisplayLabel then
         TargetDisplayLabel.Text = "🎯 Mục tiêu: " .. Settings.Target .. "s"
     end
-    if TimerDisplayLabel and TimerLabel then
-        local current = tonumber(TimerLabel.Text) or 0
+    if TimerDisplayLabel and GameUI.TimerLabel then
+        local current = tonumber(GameUI.TimerLabel.Text) or 0
         TimerDisplayLabel.Text = "⏱️ Hiện tại: " .. string.format("%.2f", current) .. "s"
     end
     if StatusLabel then
@@ -290,102 +167,269 @@ function UpdateDisplay()
     end
 end
 
--- Click vào nút Start/Stop
-local function ClickButton()
-    if not StartButton then return false end
-    -- Thử nhiều cách để click
-    local success = pcall(function()
-        -- Cách 1: Fire MouseButton1Click
-        firesignal(StartButton.MouseButton1Click)
+-- QUÉT MÀN HÌNH CHÍNH XÁC
+local function ScanScreen()
+    -- Reset
+    GameUI.TargetLabel = nil
+    GameUI.TimerLabel = nil
+    GameUI.StopButton = nil
+    GameUI.StartButton = nil
+    Settings.Target = 0
+
+    local playerGui = LocalPlayer:FindFirstChild("PlayerGui")
+    if not playerGui then
+        Settings.Status = "Chưa vào game"
+        UpdateDisplay()
+        return false
+    end
+
+    -- CÁCH TIẾP CẬN MỚI: Duyệt TẤT CẢ TextLabel, tìm số giây mục tiêu
+    -- Trong game Stop the Timer, số giây mục tiêu thường là số nguyên từ 0-15
+    -- và nằm trong một TextLabel riêng biệt, KHÔNG PHẢI đồng hồ đếm
+
+    local allLabels = {}
+    for _, obj in pairs(playerGui:GetDescendants()) do
+        if obj:IsA("TextLabel") and obj.Visible then
+            table.insert(allLabels, obj)
+        end
+    end
+
+    -- Bước 1: Tìm Target Label (số nguyên, KHÔNG có dấu chấm)
+    -- Đặc điểm: Text là số nguyên (1-15), KHÔNG thay đổi liên tục
+    local targetCandidates = {}
+    for _, lbl in pairs(allLabels) do
+        local text = lbl.Text:gsub("%s+", "") -- Xóa khoảng trắng
+        local num = tonumber(text)
+        if num and num == math.floor(num) and num >= 1 and num <= 15 then
+            -- Đây là số nguyên 1-15, có thể là target
+            table.insert(targetCandidates, lbl)
+        end
+    end
+
+    -- Nếu có nhiều, ưu tiên cái có font size trung bình (không quá to, không quá nhỏ)
+    if #targetCandidates > 0 then
+        -- Lọc: loại bỏ những label có chứa dấu chấm (số thập phân)
+        local filtered = {}
+        for _, lbl in pairs(targetCandidates) do
+            if not lbl.Text:find("%.") then
+                table.insert(filtered, lbl)
+            end
+        end
+        if #filtered > 0 then
+            targetCandidates = filtered
+        end
+        
+        -- Chọn label có font size vừa phải (thường target không phải chữ to nhất)
+        local bestLabel = targetCandidates[1]
+        for _, lbl in pairs(targetCandidates) do
+            -- Ưu tiên label có text là số nguyên thuần túy, không có ký tự khác
+            if lbl.Text:match("^%s*%d+%s*$") then
+                bestLabel = lbl
+                break
+            end
+        end
+        
+        GameUI.TargetLabel = bestLabel
+        Settings.Target = tonumber(bestLabel.Text) or 0
+        Settings.Status = "✅ Tìm thấy target: " .. Settings.Target .. "s"
+    end
+
+    -- Bước 2: Tìm Timer Label (số thập phân, cập nhật liên tục)
+    -- Đặc điểm: Text có dấu chấm (vd: 3.45), font size LỚN
+    local timerCandidates = {}
+    for _, lbl in pairs(allLabels) do
+        local text = lbl.Text:gsub("%s+", "")
+        if text:find("%.") then
+            local num = tonumber(text)
+            if num then
+                table.insert(timerCandidates, lbl)
+            end
+        end
+    end
+
+    if #timerCandidates > 0 then
+        -- Timer thường có font size lớn nhất
+        local maxFont = 0
+        for _, lbl in pairs(timerCandidates) do
+            if lbl.TextSize > maxFont then
+                maxFont = lbl.TextSize
+                GameUI.TimerLabel = lbl
+            end
+        end
+    end
+
+    -- Bước 3: Tìm nút bấm
+    -- Nút Stop thường là nút đỏ, lớn nhất màn hình
+    local allButtons = {}
+    for _, obj in pairs(playerGui:GetDescendants()) do
+        if (obj:IsA("TextButton") or obj:IsA("ImageButton")) and obj.Visible then
+            table.insert(allButtons, obj)
+        end
+    end
+
+    if #allButtons > 0 then
+        -- Tìm nút lớn nhất (thường là nút chính)
+        local maxSize = 0
+        local biggestButton = nil
+        for _, btn in pairs(allButtons) do
+            local size = btn.AbsoluteSize.X * btn.AbsoluteSize.Y
+            if size > maxSize and size < 500000 then -- Giới hạn tránh fullscreen
+                maxSize = size
+                biggestButton = btn
+            end
+        end
+        
+        if biggestButton then
+            -- Kiểm tra màu sắc để phân biệt Start/Stop
+            local bgColor = biggestButton.BackgroundColor3
+            -- Nút đỏ = Stop, nút xanh = Start
+            if bgColor.R > 0.5 and bgColor.G < 0.3 and bgColor.B < 0.3 then
+                GameUI.StopButton = biggestButton
+                GameUI.StartButton = biggestButton -- Cùng 1 nút
+            else
+                GameUI.StopButton = biggestButton
+                GameUI.StartButton = biggestButton
+            end
+        end
+    end
+
+    -- Nếu không tìm thấy target, thử cách khác
+    if not GameUI.TargetLabel then
+        -- Tìm trong tất cả text, kể cả text có chứa chữ
+        for _, lbl in pairs(allLabels) do
+            local text = lbl.Text:lower()
+            if text:find("stop at") or text:find("target") or text:find("goal") then
+                local num = tonumber(text:match("(%d+%.?%d*)"))
+                if num and num <= 15 then
+                    GameUI.TargetLabel = lbl
+                    Settings.Target = num
+                    Settings.Status = "✅ Target: " .. num .. "s"
+                    break
+                end
+            end
+        end
+    end
+
+    UpdateDisplay()
+    
+    if GameUI.TargetLabel and GameUI.TimerLabel and GameUI.StopButton then
+        Settings.Status = "✅ Sẵn sàng! Target: " .. Settings.Target .. "s"
+        UpdateDisplay()
+        return true
+    else
+        local missing = {}
+        if not GameUI.TargetLabel then table.insert(missing, "mục tiêu") end
+        if not GameUI.TimerLabel then table.insert(missing, "đồng hồ") end
+        if not GameUI.StopButton then table.insert(missing, "nút") end
+        Settings.Status = "❌ Thiếu: " .. table.concat(missing, ", ")
+        UpdateDisplay()
+        return false
+    end
+end
+
+-- Click nút
+local function ClickStopButton()
+    if not GameUI.StopButton then return false end
+    
+    local success = false
+    
+    -- Cách 1: firesignal
+    success = pcall(function()
+        if GameUI.StopButton.MouseButton1Click then
+            firesignal(GameUI.StopButton.MouseButton1Click)
+        end
     end)
+    
     if not success then
+        -- Cách 2: VirtualInputManager
         success = pcall(function()
-            -- Cách 2: VirtualInputManager
-            local pos = StartButton.AbsolutePosition + StartButton.AbsoluteSize / 2
+            local pos = GameUI.StopButton.AbsolutePosition + GameUI.StopButton.AbsoluteSize / 2
             VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, true, game, 1)
             task.wait(0.05)
             VirtualInputManager:SendMouseButtonEvent(pos.X, pos.Y, 0, false, game, 1)
         end)
     end
-    if not success then
-        pcall(function()
-            -- Cách 3: firetouchinterest (nếu là GUI button)
-            if StartButton:IsA("ImageButton") then
-                firetouchinterest(StartButton, game.Players.LocalPlayer.Character and game.Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart"), 0)
-                firetouchinterest(StartButton, game.Players.LocalPlayer.Character and game.Players.LocalPlayer.Character:FindFirstChild("HumanoidRootPart"), 1)
-            end
-        end)
-    end
-    return true
+    
+    return success
 end
 
 -- Vòng lặp tự động
 local function AutoLoop()
     while Settings.Auto do
-        -- Đảm bảo đã quét được các thành phần
-        if not StartButton or not TimerLabel or not TargetLabel then
+        -- Quét lại để chắc chắn
+        if not GameUI.TargetLabel or not GameUI.TimerLabel then
             ScanScreen()
-            if not StartButton or not TimerLabel or not TargetLabel then
-                task.wait(Settings.ScanInterval)
+            if not GameUI.TargetLabel then
+                Settings.Status = "Đang quét lại..."
+                UpdateDisplay()
+                task.wait(1)
                 continue
             end
         end
 
-        -- Đọc thời gian mục tiêu mới nhất (phòng khi thay đổi)
-        if TargetLabel then
-            local newTarget = tonumber(TargetLabel.Text:match("%d+%.?%d*"))
-            if newTarget then Settings.Target = newTarget end
+        -- Đọc target mới nhất
+        if GameUI.TargetLabel then
+            local newTarget = tonumber(GameUI.TargetLabel.Text)
+            if newTarget and newTarget >= 1 and newTarget <= 15 then
+                Settings.Target = newTarget
+            end
         end
 
         Settings.Status = "🔄 Bắt đầu..."
         UpdateDisplay()
 
-        -- Click nút Start
-        ClickButton()
-        task.wait(0.1)
+        -- Click Start
+        ClickStopButton()
+        task.wait(0.2)
 
-        -- Chờ đến khi timer đạt mục tiêu
-        Settings.Status = "⏳ Đang chờ đúng thời điểm..."
+        -- Chờ timer chạm target
+        Settings.Status = "⏳ Đang chờ..."
         local stopped = false
         local lastTime = 0
+        
         while Settings.Auto and not stopped do
-            if not TimerLabel or not TimerLabel.Parent then
+            if not GameUI.TimerLabel or not GameUI.TimerLabel.Parent then
                 ScanScreen()
-                if not TimerLabel then break end
+                if not GameUI.TimerLabel then break end
             end
-            local current = tonumber(TimerLabel.Text)
+            
+            local currentText = GameUI.TimerLabel.Text
+            local current = tonumber(currentText)
+            
             if current then
                 lastTime = current
                 UpdateDisplay()
+                
+                -- Khi current >= target - offset, click dừng
                 if current >= Settings.Target - Settings.Offset then
-                    -- Click dừng
-                    ClickButton()
-                    Settings.Status = "✅ Đã dừng tại " .. string.format("%.2f", current) .. "s"
+                    ClickStopButton()
+                    Settings.Status = "✅ Dừng tại " .. string.format("%.3f", current) .. "s (target: " .. Settings.Target .. "s)"
                     UpdateDisplay()
                     stopped = true
                 end
             end
-            task.wait()
+            
+            task.wait() -- 1 frame
         end
 
-        -- Đợi vòng mới (thường sau khi dừng game tự reset sau vài giây)
-        Settings.Status = "🔄 Đợi vòng mới..."
+        -- Chờ reset
+        Settings.Status = "🔄 Chờ vòng mới..."
         UpdateDisplay()
-        task.wait(2) -- Chờ reset
-        ScanScreen() -- Quét lại vì UI có thể thay đổi
+        task.wait(1.5)
+        ScanScreen()
     end
 end
 
--- Bắt đầu tự động
+-- Bắt đầu
 local function StartAuto()
     if Settings.Auto then return end
+    ScanScreen() -- Quét trước khi bắt đầu
     Settings.Auto = true
     if AutoToggle then AutoToggle.SetState(true) end
-    -- Chạy vòng lặp trong coroutine
     coroutine.wrap(AutoLoop)()
 end
 
--- Dừng tự động
+-- Dừng
 local function StopAuto()
     Settings.Auto = false
     if AutoToggle then AutoToggle.SetState(false) end
@@ -402,8 +446,7 @@ local function CreateMenu()
     MenuGui.Enabled = true
 
     MainFrame = Instance.new("Frame")
-    MainFrame.Name = "MainFrame"
-    MainFrame.Size = UDim2.new(0, 220, 0, 250)
+    MainFrame.Size = UDim2.new(0, 220, 0, 240)
     MainFrame.Position = UDim2.new(0, 10, 0, 50)
     MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
     MainFrame.BorderSizePixel = 0
@@ -414,19 +457,6 @@ local function CreateMenu()
     local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, 10)
     corner.Parent = MainFrame
-
-    local border = Instance.new("Frame")
-    border.Size = UDim2.new(1, 3, 1, 3)
-    border.Position = UDim2.new(0, -1.5, 0, -1.5)
-    border.BackgroundColor3 = Color3.fromRGB(0, 200, 255)
-    border.BorderSizePixel = 0
-    border.BackgroundTransparency = 0.5
-    border.ZIndex = 0
-    border.Parent = MainFrame
-
-    local borderCorner = Instance.new("UICorner")
-    borderCorner.CornerRadius = UDim.new(0, 11)
-    borderCorner.Parent = border
 
     -- Title
     local title = Instance.new("TextLabel")
@@ -455,10 +485,10 @@ local function CreateMenu()
     StatusLabel.Font = Enum.Font.Gotham
     StatusLabel.Parent = MainFrame
 
-    -- Target display
+    -- Target
     TargetDisplayLabel = Instance.new("TextLabel")
     TargetDisplayLabel.Size = UDim2.new(1, -16, 0, 22)
-    TargetDisplayLabel.Position = UDim2.new(0, 8, 0, 65)
+    TargetDisplayLabel.Position = UDim2.new(0, 8, 0, 62)
     TargetDisplayLabel.BackgroundTransparency = 1
     TargetDisplayLabel.Text = "🎯 Mục tiêu: ?"
     TargetDisplayLabel.TextColor3 = Color3.fromRGB(255, 255, 100)
@@ -467,10 +497,10 @@ local function CreateMenu()
     TargetDisplayLabel.Font = Enum.Font.GothamBold
     TargetDisplayLabel.Parent = MainFrame
 
-    -- Timer display
+    -- Timer
     TimerDisplayLabel = Instance.new("TextLabel")
     TimerDisplayLabel.Size = UDim2.new(1, -16, 0, 22)
-    TimerDisplayLabel.Position = UDim2.new(0, 8, 0, 90)
+    TimerDisplayLabel.Position = UDim2.new(0, 8, 0, 84)
     TimerDisplayLabel.BackgroundTransparency = 1
     TimerDisplayLabel.Text = "⏱️ Hiện tại: ?"
     TimerDisplayLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -479,14 +509,14 @@ local function CreateMenu()
     TimerDisplayLabel.Font = Enum.Font.Gotham
     TimerDisplayLabel.Parent = MainFrame
 
-    -- Scan button
-    CreateButton(MainFrame, "🔍 Quét màn hình", 120, Color3.fromRGB(0, 150, 200), function()
+    -- Nút quét
+    CreateButton(MainFrame, "🔍 Quét màn hình", 115, Color3.fromRGB(0, 150, 200), function()
         ScanScreen()
-        Notify("Đã quét lại!", 1)
+        Notify("Đã quét!", 1)
     end)
 
-    -- Auto Toggle
-    AutoToggle = CreateToggle(MainFrame, "🤖 Tự động bấm giờ", 160, false, function(state)
+    -- Auto toggle
+    AutoToggle = CreateToggle(MainFrame, "🤖 Tự động", 155, false, function(state)
         if state then
             StartAuto()
         else
@@ -494,13 +524,19 @@ local function CreateMenu()
         end
     end)
 
-    -- Test click button
-    CreateButton(MainFrame, "🖱️ Click thử nút", 200, Color3.fromRGB(200, 100, 0), function()
-        if StartButton then
-            ClickButton()
-            Notify("Đã click nút!", 1)
+    -- Nút test
+    CreateButton(MainFrame, "🖱️ Click nút (test)", 195, Color3.fromRGB(200, 150, 0), function()
+        if GameUI.StopButton then
+            ClickStopButton()
+            Notify("Đã click!", 1)
         else
-            Notify("Chưa tìm thấy nút! Hãy quét.", 2)
+            ScanScreen()
+            if GameUI.StopButton then
+                ClickStopButton()
+                Notify("Đã click sau khi quét!", 1)
+            else
+                Notify("Không tìm thấy nút!", 2)
+            end
         end
     end)
 
@@ -509,19 +545,20 @@ end
 
 -- Khởi tạo
 CreateMenu()
+task.wait(0.5)
 ScanScreen()
 
--- Cập nhật UI liên tục
+-- Cập nhật display
 coroutine.wrap(function()
     while true do
-        if Settings.Auto and TimerLabel then
+        if Settings.Auto and GameUI.TimerLabel then
             UpdateDisplay()
         end
         task.wait(0.1)
     end
 end)()
 
--- Dọn dẹp khi thoát
+-- Cleanup
 LocalPlayer.OnTeleport:Connect(function()
     StopAuto()
     if ScreenGui then ScreenGui:Destroy() end

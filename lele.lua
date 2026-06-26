@@ -1,8 +1,9 @@
 --[[
-    TELEPORT TO HIDER SCRIPT - PAINT AND SEEK
-    Chỉ dịch chuyển đến người đang trốn trong map
+    ESP SCRIPT - PAINT AND SEEK
+    Chỉ ESP người đang trốn trong map
+    Hiển thị: Box + Khoảng cách
     Hỗ trợ: Delta Executor
-    Game: Paint and Seek [CHRISTMAS]
+    Fix: Tắt/Bật không bị lỗi
 --]]
 
 -- Services
@@ -10,20 +11,24 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 local UserInputService = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local Workspace = game:GetService("Workspace")
 
 -- Settings
 local Settings = {
-    Teleport = {
-        Enabled = false,
-        AutoTeleport = false,
-        TeleportDelay = 1,
-        AvoidTeam = true,
-        UseTween = true,
-        TweenSpeed = 0.3,
-        OnlyInGame = true, -- Chỉ dịch chuyển đến người trong map
+    ESP = {
+        Enabled = true,
+        Box = true,
+        BoxColor = Color3.fromRGB(255, 50, 50),
+        BoxThickness = 2,
+        BoxTransparency = 1,
+        Distance = true,
+        DistanceColor = Color3.fromRGB(255, 255, 255),
+        DistanceSize = 14,
+        MaxDistance = 500,
+        OnlyInGame = true,
+        OnlyHiders = true,
+        RefreshRate = 0 -- 0 = mỗi frame
     },
     Menu = {
         Keybind = Enum.KeyCode.Delete,
@@ -33,24 +38,20 @@ local Settings = {
     }
 }
 
--- Biến toàn cục
-local TeleportConnection = nil
-local CurrentTarget = nil
-local HiderList = {}
-local InGameHiderList = {} -- Người trốn thực sự trong map
-local LobbyList = {} -- Người ở sảnh
-local PlayerListGui = nil
+-- ESP Data
+local ESPData = {}
+local Connections = {}
 
 -- Tạo ScreenGui
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "TeleportGUI"
+ScreenGui.Name = "ESPGUI"
 ScreenGui.Parent = CoreGui
 ScreenGui.ResetOnSpawn = false
 
 -- Menu elements
 local MenuGui
 local MainFrame
-local TargetInfoLabel
+local PlayerCountLabel
 local MinimizeButton
 
 -- Hàm tạo thông báo
@@ -75,7 +76,7 @@ local function CreateNotification(text, duration)
     notifText.Size = UDim2.new(1, 0, 1, 0)
     notifText.BackgroundTransparency = 1
     notifText.Text = text
-    notifText.TextColor3 = Color3.fromRGB(0, 255, 100)
+    notifText.TextColor3 = Color3.fromRGB(255, 100, 100)
     notifText.TextSize = 16
     notifText.Font = Enum.Font.GothamBold
     notifText.Parent = notifFrame
@@ -85,7 +86,7 @@ local function CreateNotification(text, duration)
     end)
 end
 
--- Tạo Toggle Button
+-- Tạo Toggle
 local function CreateToggle(parent, text, yPos, default, callback)
     local frame = Instance.new("Frame")
     frame.Size = UDim2.new(1, -16, 0, 28)
@@ -125,7 +126,9 @@ local function CreateToggle(parent, text, yPos, default, callback)
         state = not state
         btn.BackgroundColor3 = state and Color3.fromRGB(0, 180, 100) or Color3.fromRGB(200, 50, 50)
         btn.Text = state and "ON" or "OFF"
-        if callback then callback(state) end
+        if callback then
+            callback(state)
+        end
     end)
     
     return {
@@ -135,49 +138,14 @@ local function CreateToggle(parent, text, yPos, default, callback)
             state = s
             btn.BackgroundColor3 = state and Color3.fromRGB(0, 180, 100) or Color3.fromRGB(200, 50, 50)
             btn.Text = state and "ON" or "OFF"
-            if callback then callback(state) end
+            if callback then
+                callback(state)
+            end
         end
     }
 end
 
--- Tạo Button
-local function CreateButton(parent, text, yPos, color, callback)
-    local btn = Instance.new("TextButton")
-    btn.Size = UDim2.new(1, -16, 0, 32)
-    btn.Position = UDim2.new(0, 8, 0, yPos)
-    btn.BackgroundColor3 = color or Color3.fromRGB(70, 70, 100)
-    btn.BorderSizePixel = 0
-    btn.Text = text
-    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    btn.TextSize = 13
-    btn.Font = Enum.Font.GothamBold
-    btn.AutoButtonColor = false
-    btn.Parent = parent
-    
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 5)
-    corner.Parent = btn
-    
-    btn.MouseEnter:Connect(function()
-        btn.BackgroundColor3 = Color3.new(
-            math.min(color.R + 25, 255),
-            math.min(color.G + 25, 255),
-            math.min(color.B + 25, 255)
-        )
-    end)
-    
-    btn.MouseLeave:Connect(function()
-        btn.BackgroundColor3 = color
-    end)
-    
-    btn.MouseButton1Click:Connect(function()
-        if callback then callback() end
-    end)
-    
-    return btn
-end
-
--- Kiểm tra người chơi có đang trong map không (không ở sảnh)
+-- Kiểm tra người chơi có trong map không
 local function IsPlayerInGame(player)
     local character = player.Character
     if not character then return false end
@@ -187,59 +155,26 @@ local function IsPlayerInGame(player)
     
     local position = rootPart.Position
     
-    -- Các dấu hiệu người chơi đang ở sảnh:
-    -- 1. Vị trí Y rất cao (thường là spawn point trên trời)
-    -- 2. Đang ở gần vị trí spawn (thường là (0, 0, 0) hoặc vị trí cố định)
-    -- 3. Character không có animation hoặc đứng yên
-    -- 4. Có tag "Lobby" hoặc "Waiting" trong character
-    
-    -- Kiểm tra tag Lobby
+    -- Kiểm tra tag
     if character:FindFirstChild("Lobby") or character:FindFirstChild("Waiting") then
         return false
     end
     
-    -- Kiểm tra vị trí Y quá cao (sảnh thường ở trên cao)
+    -- Vị trí Y quá cao
     if position.Y > 100 then
         return false
     end
     
-    -- Kiểm tra nếu đang ở spawn point (0, 20, 0) hoặc gần đó
+    -- Gần spawn point
     local spawnDistance = (position - Vector3.new(0, 20, 0)).Magnitude
     if spawnDistance < 30 then
         return false
     end
     
-    -- Kiểm tra vận tốc - nếu đứng yên quá lâu ở vị trí cao
-    local humanoid = character:FindFirstChild("Humanoid")
-    if humanoid then
-        local velocity = rootPart.Velocity
-        -- Nếu đứng yên hoàn toàn ở vị trí lạ
-        if velocity.Magnitude < 1 and position.Y > 50 then
-            return false
-        end
-    end
-    
-    -- Kiểm tra team - người trốn (Hider) thường có team khác với seeker
+    -- Team lobby
     if player.Team then
         local teamName = player.Team.Name:lower()
-        -- Nếu team chứa từ "lobby" hoặc "waiting"
         if teamName:find("lobby") or teamName:find("wait") then
-            return false
-        end
-    end
-    
-    -- Kiểm tra player có đang thực sự "sống" trong game không
-    -- Một số game có folder "InGame" hoặc "Playing"
-    local gameFolder = Workspace:FindFirstChild("InGame") or Workspace:FindFirstChild("Playing")
-    if gameFolder then
-        local inGame = false
-        for _, obj in pairs(gameFolder:GetChildren()) do
-            if obj == character or obj == rootPart then
-                inGame = true
-                break
-            end
-        end
-        if not inGame then
             return false
         end
     end
@@ -247,54 +182,270 @@ local function IsPlayerInGame(player)
     return true
 end
 
--- Phân loại người chơi (chỉ lấy người trốn trong map)
-local function ClassifyPlayers()
-    HiderList = {}
-    InGameHiderList = {}
-    LobbyList = {}
+-- Kiểm tra có phải người trốn không
+local function IsHider(player)
+    local character = player.Character
+    if not character then return false end
+    
+    -- Kiểm tra team
+    if player.Team and LocalPlayer.Team then
+        -- Cùng team với local player = người trốn
+        if player.Team == LocalPlayer.Team then
+            return true
+        end
+    end
+    
+    -- Kiểm tra transparency (người trốn thường trong suốt)
+    for _, part in pairs(character:GetChildren()) do
+        if part:IsA("BasePart") and part.Transparency > 0.3 then
+            return true
+        end
+    end
+    
+    return false
+end
+
+-- World to Screen
+local function WorldToScreen(position)
+    local camera = Workspace.CurrentCamera
+    if not camera then return nil end
+    
+    local screenPos, onScreen = camera:WorldToScreenPoint(position)
+    return Vector2.new(screenPos.X, screenPos.Y), onScreen, screenPos.Z
+end
+
+-- Xóa ESP của một player
+local function RemoveESP(player)
+    local data = ESPData[player]
+    if not data then return end
+    
+    -- Ngắt connection
+    if data.Connection then
+        data.Connection:Disconnect()
+        data.Connection = nil
+    end
+    
+    -- Xóa drawing objects
+    if data.Box then
+        pcall(function() data.Box:Destroy() end)
+        data.Box = nil
+    end
+    if data.DistanceTag then
+        pcall(function() data.DistanceTag:Destroy() end)
+        data.DistanceTag = nil
+    end
+    
+    ESPData[player] = nil
+end
+
+-- Xóa tất cả ESP
+local function ClearAllESP()
+    for player, data in pairs(ESPData) do
+        if data.Connection then
+            data.Connection:Disconnect()
+        end
+        if data.Box then
+            pcall(function() data.Box:Destroy() end)
+        end
+        if data.DistanceTag then
+            pcall(function() data.DistanceTag:Destroy() end)
+        end
+    end
+    ESPData = {}
+end
+
+-- Tạo ESP cho một player
+local function CreateESP(player)
+    -- Xóa ESP cũ nếu có
+    RemoveESP(player)
+    
+    -- Kiểm tra player có hợp lệ không
+    if player == LocalPlayer then return end
+    
+    local character = player.Character
+    if not character then return end
+    
+    local rootPart = character:FindFirstChild("HumanoidRootPart")
+    local head = character:FindFirstChild("Head")
+    local humanoid = character:FindFirstChild("Humanoid")
+    
+    if not rootPart or not head or not humanoid then return end
+    
+    -- Khởi tạo data
+    ESPData[player] = {
+        Box = nil,
+        DistanceTag = nil,
+        Connection = nil
+    }
+    
+    -- Tạo Box
+    if Drawing then
+        local box = Drawing.new("Square")
+        box.Visible = false
+        box.Color = Settings.ESP.BoxColor
+        box.Thickness = Settings.ESP.BoxThickness
+        box.Transparency = Settings.ESP.BoxTransparency
+        box.Filled = false
+        box.ZIndex = 1
+        ESPData[player].Box = box
+    end
+    
+    -- Tạo Distance
+    if Drawing then
+        local distTag = Drawing.new("Text")
+        distTag.Visible = false
+        distTag.Color = Settings.ESP.DistanceColor
+        distTag.Size = Settings.ESP.DistanceSize
+        distTag.Center = true
+        distTag.Outline = true
+        distTag.OutlineColor = Color3.new(0, 0, 0)
+        distTag.ZIndex = 2
+        ESPData[player].DistanceTag = distTag
+    end
+    
+    -- Render loop
+    local connection
+    connection = RunService.RenderStepped:Connect(function()
+        local data = ESPData[player]
+        if not data then
+            if connection then connection:Disconnect() end
+            return
+        end
+        
+        local box = data.Box
+        local distTag = data.DistanceTag
+        
+        -- Kiểm tra ESP Master Enable
+        if not Settings.ESP.Enabled then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        -- Kiểm tra player còn tồn tại
+        if not player or not player.Parent then
+            RemoveESP(player)
+            return
+        end
+        
+        local char = player.Character
+        if not char or not char.Parent then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        local hum = char:FindFirstChild("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local hd = char:FindFirstChild("Head")
+        
+        if not hum or hum.Health <= 0 or not hrp or not hd then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        -- Kiểm tra OnlyHiders
+        if Settings.ESP.OnlyHiders and not IsHider(player) then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        -- Kiểm tra OnlyInGame
+        if Settings.ESP.OnlyInGame and not IsPlayerInGame(player) then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        -- Tính toán vị trí
+        local rootPos = hrp.Position
+        local headPos = hd.Position
+        
+        local localChar = LocalPlayer.Character
+        local localRoot = localChar and localChar:FindFirstChild("HumanoidRootPart")
+        local distance = localRoot and (localRoot.Position - rootPos).Magnitude or 9999
+        
+        -- Kiểm tra khoảng cách
+        if distance > Settings.ESP.MaxDistance then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        -- World to Screen
+        local feetPos = rootPos - Vector3.new(0, 3, 0)
+        local headTopPos = headPos + Vector3.new(0, 0.5, 0)
+        
+        local feetScreen, feetOnScreen, feetDepth = WorldToScreen(feetPos)
+        local headScreen, headOnScreen = WorldToScreen(headTopPos)
+        local centerScreen = WorldToScreen(rootPos)
+        
+        if not feetOnScreen or not headOnScreen or feetDepth < 0 then
+            if box then box.Visible = false end
+            if distTag then distTag.Visible = false end
+            return
+        end
+        
+        -- Kích thước box
+        local boxHeight = math.abs(headScreen.Y - feetScreen.Y)
+        local boxWidth = boxHeight * 0.5
+        
+        -- Vẽ Box
+        if box and Settings.ESP.Box then
+            box.Size = Vector2.new(boxWidth, boxHeight)
+            box.Position = Vector2.new(centerScreen.X - boxWidth/2, feetScreen.Y - boxHeight)
+            box.Visible = true
+            box.Color = Settings.ESP.BoxColor
+        elseif box then
+            box.Visible = false
+        end
+        
+        -- Vẽ Khoảng cách
+        if distTag and Settings.ESP.Distance then
+            distTag.Text = math.floor(distance) .. "m"
+            distTag.Position = Vector2.new(centerScreen.X, headScreen.Y - 25)
+            distTag.Visible = true
+            distTag.Color = Settings.ESP.DistanceColor
+        elseif distTag then
+            distTag.Visible = false
+        end
+    end)
+    
+    ESPData[player].Connection = connection
+end
+
+-- Refresh tất cả ESP
+local function RefreshAllESP()
+    -- Xóa tất cả ESP hiện tại
+    ClearAllESP()
+    
+    -- Tạo lại ESP cho tất cả player hợp lệ
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            CreateESP(player)
+        end
+    end
+    
+    UpdatePlayerCount()
+end
+
+-- Cập nhật số lượng người chơi
+local function UpdatePlayerCount()
+    local inGameCount = 0
+    local totalHiders = 0
     
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer then
             local character = player.Character
             if character then
                 local humanoid = character:FindFirstChild("Humanoid")
-                local rootPart = character:FindFirstChild("HumanoidRootPart")
-                
-                if humanoid and humanoid.Health > 0 and rootPart then
-                    local playerData = {
-                        Player = player,
-                        Character = character,
-                        RootPart = rootPart,
-                        Position = rootPart.Position,
-                        Name = player.DisplayName or player.Name
-                    }
-                    
-                    -- Kiểm tra có phải người trốn không
-                    local isHider = false
-                    
-                    if player.Team and LocalPlayer.Team then
-                        -- Cùng team = đồng đội (cùng phe trốn)
-                        if player.Team == LocalPlayer.Team then
-                            isHider = true
-                        end
-                    else
-                        -- Không có team, kiểm tra transparency
-                        for _, part in pairs(character:GetChildren()) do
-                            if part:IsA("BasePart") and part.Transparency > 0.3 then
-                                isHider = true
-                                break
-                            end
-                        end
-                    end
-                    
-                    if isHider then
-                        -- Là người trốn, kiểm tra có trong map không
+                if humanoid and humanoid.Health > 0 then
+                    if IsHider(player) then
+                        totalHiders = totalHiders + 1
                         if IsPlayerInGame(player) then
-                            table.insert(InGameHiderList, playerData)
-                            table.insert(HiderList, playerData)
-                        else
-                            table.insert(LobbyList, playerData)
-                            table.insert(HiderList, playerData)
+                            inGameCount = inGameCount + 1
                         end
                     end
                 end
@@ -302,149 +453,36 @@ local function ClassifyPlayers()
         end
     end
     
-    return InGameHiderList, HiderList, LobbyList
-end
-
--- Lấy mục tiêu ngẫu nhiên từ người trốn trong map
-local function GetRandomHider()
-    ClassifyPlayers()
-    
-    if #InGameHiderList == 0 then
-        -- Không có ai trong map, thử tìm lại
-        task.wait(0.5)
-        ClassifyPlayers()
-        
-        if #InGameHiderList == 0 then
-            CreateNotification("❌ Không tìm thấy người trốn trong map!", 2)
-            return nil
-        end
-    end
-    
-    local randomIndex = math.random(1, #InGameHiderList)
-    return InGameHiderList[randomIndex]
-end
-
--- Dịch chuyển đến mục tiêu
-local function TeleportToTarget(target, useTween)
-    if not target or not target.RootPart then return false end
-    
-    local character = LocalPlayer.Character
-    if not character then return false end
-    
-    local rootPart = character:FindFirstChild("HumanoidRootPart")
-    local humanoid = character:FindFirstChild("Humanoid")
-    
-    if not rootPart or not humanoid or humanoid.Health <= 0 then
-        CreateNotification("❌ Nhân vật đã chết!", 2)
-        return false
-    end
-    
-    local targetPos = target.RootPart.Position
-    local offset = Vector3.new(
-        math.random(-3, 3),
-        0,
-        math.random(-3, 3)
-    )
-    local finalPos = targetPos + offset
-    
-    if not useTween then
-        pcall(function()
-            rootPart.CFrame = CFrame.new(finalPos)
-        end)
-        
-        if (rootPart.Position - finalPos).Magnitude < 10 then
-            CreateNotification("✅ Đã đến: " .. target.Name, 2)
-            CurrentTarget = target
-            UpdateTargetInfo()
-            return true
-        end
-    end
-    
-    if useTween then
-        local tweenInfo = TweenInfo.new(
-            Settings.Teleport.TweenSpeed,
-            Enum.EasingStyle.Linear,
-            Enum.EasingDirection.Out
-        )
-        
-        local tween = TweenService:Create(rootPart, tweenInfo, {
-            CFrame = CFrame.new(finalPos)
-        })
-        
-        tween:Play()
-        tween.Completed:Wait()
-        
-        CreateNotification("✅ Đã đến: " .. target.Name, 2)
-        CurrentTarget = target
-        UpdateTargetInfo()
-        return true
-    end
-    
-    pcall(function()
-        humanoid:MoveTo(finalPos)
-        task.wait(0.1)
-    end)
-    
-    if (rootPart.Position - finalPos).Magnitude < 15 then
-        CreateNotification("✅ Gần: " .. target.Name, 2)
-        CurrentTarget = target
-        UpdateTargetInfo()
-        return true
-    end
-    
-    CreateNotification("❌ Không thể dịch chuyển!", 2)
-    return false
-end
-
--- Cập nhật UI
-local function UpdateTargetInfo()
-    ClassifyPlayers()
-    
-    if TargetInfoLabel then
-        local info = string.format(
-            "🟢 Trốn trong map: %d\n🏠 Ở sảnh: %d | 🎯: %s",
-            #InGameHiderList,
-            #LobbyList,
-            CurrentTarget and CurrentTarget.Name or "-"
-        )
-        TargetInfoLabel.Text = info
+    if PlayerCountLabel then
+        PlayerCountLabel.Text = string.format("🟢 Trốn: %d (Map: %d)", totalHiders, inGameCount)
     end
     
     if MinimizeButton then
-        MinimizeButton.Text = "🎯\n" .. #InGameHiderList
+        MinimizeButton.Text = "👁\n" .. inGameCount
     end
 end
 
--- Auto Teleport Loop
-local function AutoTeleportLoop()
-    while Settings.Teleport.AutoTeleport do
-        UpdateTargetInfo()
-        
-        local target = GetRandomHider()
-        
-        if target then
-            TeleportToTarget(target, Settings.Teleport.UseTween)
+-- Player Added
+local function OnPlayerAdded(player)
+    if player == LocalPlayer then return end
+    
+    local function OnCharacterAdded(character)
+        task.wait(0.3)
+        if Settings.ESP.Enabled then
+            CreateESP(player)
         end
-        
-        task.wait(Settings.Teleport.TeleportDelay)
-    end
-end
-
--- Bắt đầu Auto Teleport
-local function StartAutoTeleport()
-    if TeleportConnection then
-        TeleportConnection = nil
     end
     
-    Settings.Teleport.AutoTeleport = true
-    TeleportConnection = coroutine.wrap(AutoTeleportLoop)
-    TeleportConnection()
+    if player.Character then
+        OnCharacterAdded(player.Character)
+    end
+    
+    player.CharacterAdded:Connect(OnCharacterAdded)
 end
 
--- Dừng Auto Teleport
-local function StopAutoTeleport()
-    Settings.Teleport.AutoTeleport = false
-    TeleportConnection = nil
+-- Player Removing
+local function OnPlayerRemoving(player)
+    RemoveESP(player)
 end
 
 -- Thu nhỏ menu
@@ -457,7 +495,6 @@ local function MinimizeMenu()
     if MinimizeButton then
         MinimizeButton.Visible = true
     end
-    ClosePlayerList()
 end
 
 -- Mở rộng menu
@@ -470,19 +507,19 @@ local function MaximizeMenu()
     if MinimizeButton then
         MinimizeButton.Visible = false
     end
-    UpdateTargetInfo()
+    UpdatePlayerCount()
 end
 
 -- Tạo icon thu nhỏ
 local function CreateMinimizedIcon()
     MinimizeButton = Instance.new("TextButton")
-    MinimizeButton.Name = "MinimizedTeleport"
+    MinimizeButton.Name = "MinimizedESP"
     MinimizeButton.Size = UDim2.new(0, 45, 0, 45)
     MinimizeButton.Position = UDim2.new(0, 15, 0, 100)
     MinimizeButton.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
     MinimizeButton.BorderSizePixel = 0
-    MinimizeButton.Text = "🎯\n0"
-    MinimizeButton.TextColor3 = Color3.fromRGB(100, 255, 150)
+    MinimizeButton.Text = "👁\n0"
+    MinimizeButton.TextColor3 = Color3.fromRGB(255, 100, 100)
     MinimizeButton.TextSize = 14
     MinimizeButton.Font = Enum.Font.GothamBold
     MinimizeButton.Active = true
@@ -498,7 +535,7 @@ local function CreateMinimizedIcon()
     local border = Instance.new("Frame")
     border.Size = UDim2.new(1, 4, 1, 4)
     border.Position = UDim2.new(0, -2, 0, -2)
-    border.BackgroundColor3 = Color3.fromRGB(100, 255, 150)
+    border.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
     border.BackgroundTransparency = 0.5
     border.BorderSizePixel = 0
     border.ZIndex = 0
@@ -508,14 +545,6 @@ local function CreateMinimizedIcon()
     borderCorner.CornerRadius = UDim.new(0, 25)
     borderCorner.Parent = border
     
-    MinimizeButton.MouseEnter:Connect(function()
-        MinimizeButton.BackgroundColor3 = Color3.fromRGB(45, 45, 55)
-    end)
-    
-    MinimizeButton.MouseLeave:Connect(function()
-        MinimizeButton.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
-    end)
-    
     MinimizeButton.MouseButton1Click:Connect(function()
         MaximizeMenu()
     end)
@@ -523,231 +552,17 @@ local function CreateMinimizedIcon()
     return MinimizeButton
 end
 
--- Đóng danh sách người chơi
-function ClosePlayerList()
-    if PlayerListGui then
-        PlayerListGui:Destroy()
-        PlayerListGui = nil
-    end
-end
-
--- Hiển thị danh sách người chơi
-function ShowPlayerList()
-    if PlayerListGui then
-        ClosePlayerList()
-        return
-    end
-    
-    ClassifyPlayers()
-    
-    PlayerListGui = Instance.new("ScreenGui")
-    PlayerListGui.Name = "PlayerList"
-    PlayerListGui.Parent = CoreGui
-    PlayerListGui.ResetOnSpawn = false
-    
-    local bgBlur = Instance.new("TextButton")
-    bgBlur.Size = UDim2.new(1, 0, 1, 0)
-    bgBlur.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-    bgBlur.BackgroundTransparency = 0.5
-    bgBlur.BorderSizePixel = 0
-    bgBlur.Text = ""
-    bgBlur.AutoButtonColor = false
-    bgBlur.Parent = PlayerListGui
-    
-    bgBlur.MouseButton1Click:Connect(function()
-        ClosePlayerList()
-    end)
-    
-    local listFrame = Instance.new("Frame")
-    listFrame.Size = UDim2.new(0, 250, 0, 380)
-    listFrame.Position = UDim2.new(0.5, -125, 0.5, -190)
-    listFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 35)
-    listFrame.BorderSizePixel = 0
-    listFrame.Active = true
-    listFrame.Draggable = true
-    listFrame.Parent = PlayerListGui
-    
-    local listCorner = Instance.new("UICorner")
-    listCorner.CornerRadius = UDim.new(0, 10)
-    listCorner.Parent = listFrame
-    
-    -- Title
-    local listTitle = Instance.new("Frame")
-    listTitle.Size = UDim2.new(1, 0, 0, 38)
-    listTitle.BackgroundColor3 = Color3.fromRGB(38, 38, 45)
-    listTitle.BorderSizePixel = 0
-    listTitle.Parent = listFrame
-    
-    local listTitleCorner = Instance.new("UICorner")
-    listTitleCorner.CornerRadius = UDim.new(0, 10)
-    listTitleCorner.Parent = listTitle
-    
-    local titleText = Instance.new("TextLabel")
-    titleText.Size = UDim2.new(1, -40, 1, 0)
-    titleText.Position = UDim2.new(0, 15, 0, 0)
-    titleText.BackgroundTransparency = 1
-    titleText.Text = "👥 NGƯỜI TRỐN (" .. #InGameHiderList .. ")"
-    titleText.TextColor3 = Color3.fromRGB(255, 255, 255)
-    titleText.TextSize = 15
-    titleText.TextXAlignment = Enum.TextXAlignment.Left
-    titleText.Font = Enum.Font.GothamBold
-    titleText.Parent = listTitle
-    
-    local closeX = Instance.new("TextButton")
-    closeX.Size = UDim2.new(0, 25, 0, 25)
-    closeX.Position = UDim2.new(1, -32, 0.5, -12)
-    closeX.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
-    closeX.BorderSizePixel = 0
-    closeX.Text = "✕"
-    closeX.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeX.TextSize = 14
-    closeX.Font = Enum.Font.GothamBold
-    closeX.AutoButtonColor = false
-    closeX.Parent = listTitle
-    
-    local closeXCorner = Instance.new("UICorner")
-    closeXCorner.CornerRadius = UDim.new(0, 13)
-    closeXCorner.Parent = closeX
-    
-    closeX.MouseButton1Click:Connect(function()
-        ClosePlayerList()
-    end)
-    
-    -- Scrolling Frame
-    local scrollFrame = Instance.new("ScrollingFrame")
-    scrollFrame.Size = UDim2.new(1, -10, 1, -83)
-    scrollFrame.Position = UDim2.new(0, 5, 0, 43)
-    scrollFrame.BackgroundTransparency = 1
-    scrollFrame.BorderSizePixel = 0
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
-    scrollFrame.ScrollBarThickness = 4
-    scrollFrame.ScrollBarImageColor3 = Color3.fromRGB(100, 255, 150)
-    scrollFrame.Parent = listFrame
-    
-    local scrollList = Instance.new("UIListLayout")
-    scrollList.Padding = UDim.new(0, 4)
-    scrollList.Parent = scrollFrame
-    
-    local ySize = 0
-    
-    -- Người trốn trong map
-    if #InGameHiderList > 0 then
-        local headerLabel = Instance.new("TextLabel")
-        headerLabel.Size = UDim2.new(1, -5, 0, 22)
-        headerLabel.BackgroundTransparency = 1
-        headerLabel.Text = "🟢 ĐANG TRỐN TRONG MAP (" .. #InGameHiderList .. ")"
-        headerLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
-        headerLabel.TextSize = 11
-        headerLabel.TextXAlignment = Enum.TextXAlignment.Left
-        headerLabel.Font = Enum.Font.GothamBold
-        headerLabel.Parent = scrollFrame
-        ySize = ySize + 26
-        
-        for _, hider in pairs(InGameHiderList) do
-            local playerBtn = Instance.new("TextButton")
-            playerBtn.Size = UDim2.new(1, -5, 0, 32)
-            playerBtn.BackgroundColor3 = Color3.fromRGB(35, 55, 35)
-            playerBtn.BorderSizePixel = 0
-            playerBtn.Text = "  🟢 " .. hider.Name
-            playerBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-            playerBtn.TextSize = 12
-            playerBtn.TextXAlignment = Enum.TextXAlignment.Left
-            playerBtn.Font = Enum.Font.Gotham
-            playerBtn.AutoButtonColor = false
-            playerBtn.Parent = scrollFrame
-            
-            local btnCorner = Instance.new("UICorner")
-            btnCorner.CornerRadius = UDim.new(0, 5)
-            btnCorner.Parent = playerBtn
-            
-            playerBtn.MouseButton1Click:Connect(function()
-                TeleportToTarget(hider, Settings.Teleport.UseTween)
-                ClosePlayerList()
-                UpdateTargetInfo()
-            end)
-            
-            ySize = ySize + 36
-        end
-    else
-        local noPlayerLabel = Instance.new("TextLabel")
-        noPlayerLabel.Size = UDim2.new(1, -5, 0, 30)
-        noPlayerLabel.BackgroundTransparency = 1
-        noPlayerLabel.Text = "❌ Không có người trốn trong map!"
-        noPlayerLabel.TextColor3 = Color3.fromRGB(255, 150, 150)
-        noPlayerLabel.TextSize = 12
-        noPlayerLabel.Font = Enum.Font.Gotham
-        noPlayerLabel.Parent = scrollFrame
-        ySize = ySize + 30
-    end
-    
-    -- Người ở sảnh (không thể dịch chuyển)
-    if #LobbyList > 0 then
-        ySize = ySize + 10
-        local headerLabel = Instance.new("TextLabel")
-        headerLabel.Size = UDim2.new(1, -5, 0, 22)
-        headerLabel.BackgroundTransparency = 1
-        headerLabel.Text = "🏠 Ở SẢNH - KHÔNG THỂ DỊCH CHUYỂN (" .. #LobbyList .. ")"
-        headerLabel.TextColor3 = Color3.fromRGB(255, 200, 100)
-        headerLabel.TextSize = 11
-        headerLabel.TextXAlignment = Enum.TextXAlignment.Left
-        headerLabel.Font = Enum.Font.GothamBold
-        headerLabel.Parent = scrollFrame
-        ySize = ySize + 26
-        
-        for _, lobbyPlayer in pairs(LobbyList) do
-            local playerLabel = Instance.new("TextLabel")
-            playerLabel.Size = UDim2.new(1, -5, 0, 25)
-            playerLabel.BackgroundColor3 = Color3.fromRGB(50, 45, 35)
-            playerLabel.BorderSizePixel = 0
-            playerLabel.Text = "  🏠 " .. lobbyPlayer.Name .. " (Sảnh)"
-            playerLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-            playerLabel.TextSize = 11
-            playerLabel.TextXAlignment = Enum.TextXAlignment.Left
-            playerLabel.Font = Enum.Font.Gotham
-            playerLabel.Parent = scrollFrame
-            
-            local labelCorner = Instance.new("UICorner")
-            labelCorner.CornerRadius = UDim.new(0, 4)
-            labelCorner.Parent = playerLabel
-            
-            ySize = ySize + 29
-        end
-    end
-    
-    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, ySize + 10)
-    
-    local closeBtn = Instance.new("TextButton")
-    closeBtn.Size = UDim2.new(1, -20, 0, 30)
-    closeBtn.Position = UDim2.new(0, 10, 1, -35)
-    closeBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
-    closeBtn.BorderSizePixel = 0
-    closeBtn.Text = "ĐÓNG [ESC]"
-    closeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    closeBtn.TextSize = 12
-    closeBtn.Font = Enum.Font.GothamBold
-    closeBtn.AutoButtonColor = false
-    closeBtn.Parent = listFrame
-    
-    local closeBtnCorner = Instance.new("UICorner")
-    closeBtnCorner.CornerRadius = UDim.new(0, 5)
-    closeBtnCorner.Parent = closeBtn
-    
-    closeBtn.MouseButton1Click:Connect(function()
-        ClosePlayerList()
-    end)
-end
-
 -- Tạo Menu
 local function CreateMenu()
     MenuGui = Instance.new("ScreenGui")
-    MenuGui.Name = "TeleportMenu"
+    MenuGui.Name = "ESPMenu"
     MenuGui.Parent = CoreGui
     MenuGui.ResetOnSpawn = false
     MenuGui.Enabled = Settings.Menu.Visible and not Settings.Menu.Minimized
     
     MainFrame = Instance.new("Frame")
     MainFrame.Name = "MainFrame"
-    MainFrame.Size = UDim2.new(0, 230, 0, 280)
+    MainFrame.Size = UDim2.new(0, 220, 0, 260)
     MainFrame.Position = Settings.Menu.Position
     MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
     MainFrame.BorderSizePixel = 0
@@ -762,7 +577,7 @@ local function CreateMenu()
     local border = Instance.new("Frame")
     border.Size = UDim2.new(1, 3, 1, 3)
     border.Position = UDim2.new(0, -1.5, 0, -1.5)
-    border.BackgroundColor3 = Color3.fromRGB(100, 255, 150)
+    border.BackgroundColor3 = Color3.fromRGB(255, 100, 100)
     border.BorderSizePixel = 0
     border.BackgroundTransparency = 0.5
     border.ZIndex = 0
@@ -807,105 +622,158 @@ local function CreateMenu()
     title.Size = UDim2.new(1, -70, 1, 0)
     title.Position = UDim2.new(0, 12, 0, 0)
     title.BackgroundTransparency = 1
-    title.Text = "🎯 TELEPORT HIDER"
-    title.TextColor3 = Color3.fromRGB(100, 255, 150)
+    title.Text = "👁 ESP HIDER"
+    title.TextColor3 = Color3.fromRGB(255, 100, 100)
     title.TextSize = 14
     title.TextXAlignment = Enum.TextXAlignment.Left
     title.Font = Enum.Font.GothamBold
     title.Parent = titleBar
     
-    -- Target Info
-    TargetInfoLabel = Instance.new("TextLabel")
-    TargetInfoLabel.Size = UDim2.new(1, -16, 0, 35)
-    TargetInfoLabel.Position = UDim2.new(0, 8, 0, 43)
-    TargetInfoLabel.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
-    TargetInfoLabel.BorderSizePixel = 0
-    TargetInfoLabel.Text = "🟢 Trong map: 0\n🏠 Sảnh: 0 | 🎯: -"
-    TargetInfoLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
-    TargetInfoLabel.TextSize = 11
-    TargetInfoLabel.Font = Enum.Font.Gotham
-    TargetInfoLabel.Parent = MainFrame
+    -- Player Count
+    PlayerCountLabel = Instance.new("TextLabel")
+    PlayerCountLabel.Size = UDim2.new(1, -16, 0, 30)
+    PlayerCountLabel.Position = UDim2.new(0, 8, 0, 43)
+    PlayerCountLabel.BackgroundColor3 = Color3.fromRGB(35, 35, 42)
+    PlayerCountLabel.BorderSizePixel = 0
+    PlayerCountLabel.Text = "🟢 Trốn: 0 (Map: 0)"
+    PlayerCountLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    PlayerCountLabel.TextSize = 11
+    PlayerCountLabel.Font = Enum.Font.Gotham
+    PlayerCountLabel.Parent = MainFrame
     
     local infoCorner = Instance.new("UICorner")
     infoCorner.CornerRadius = UDim.new(0, 5)
-    infoCorner.Parent = TargetInfoLabel
+    infoCorner.Parent = PlayerCountLabel
     
-    -- Buttons
-    local btnY = 85
+    -- Toggles
+    local btnY = 80
     
-    CreateButton(MainFrame, "🎲 Dịch chuyển đến người trốn", btnY, 
-        Color3.fromRGB(0, 180, 90), function()
-        local target = GetRandomHider()
-        if target then
-            TeleportToTarget(target, Settings.Teleport.UseTween)
-        end
-    end)
-    
-    btnY = btnY + 38
-    
-    CreateButton(MainFrame, "👥 Danh sách người trốn", btnY, 
-        Color3.fromRGB(160, 120, 0), function()
-        ShowPlayerList()
-    end)
-    
-    btnY = btnY + 42
-    
-    -- Separator
-    local sep = Instance.new("Frame")
-    sep.Size = UDim2.new(1, -16, 0, 1)
-    sep.Position = UDim2.new(0, 8, 0, btnY)
-    sep.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
-    sep.BorderSizePixel = 0
-    sep.Parent = MainFrame
-    
-    btnY = btnY + 10
-    
-    CreateToggle(MainFrame, "🤖 Auto Teleport", btnY, 
-        Settings.Teleport.AutoTeleport, function(state)
-        Settings.Teleport.AutoTeleport = state
+    CreateToggle(MainFrame, "👁 ESP Enabled", btnY, 
+        Settings.ESP.Enabled, function(state)
+        Settings.ESP.Enabled = state
         if state then
-            StartAutoTeleport()
+            -- Bật lại ESP - tạo mới tất cả
+            RefreshAllESP()
+            CreateNotification("✅ ESP đã bật!", 1.5)
         else
-            StopAutoTeleport()
+            -- Tắt ESP - ẩn tất cả
+            for _, data in pairs(ESPData) do
+                if data.Box then data.Box.Visible = false end
+                if data.DistanceTag then data.DistanceTag.Visible = false end
+            end
+            CreateNotification("❌ ESP đã tắt!", 1.5)
         end
     end)
     
-    btnY = btnY + 32
+    btnY = btnY + 35
     
-    CreateToggle(MainFrame, "🚫 Tránh đồng đội", btnY, 
-        Settings.Teleport.AvoidTeam, function(state)
-        Settings.Teleport.AvoidTeam = state
+    CreateToggle(MainFrame, "📦 Hiện Box", btnY, 
+        Settings.ESP.Box, function(state)
+        Settings.ESP.Box = state
+        -- Cập nhật visibility ngay lập tức
+        for _, data in pairs(ESPData) do
+            if data.Box then
+                data.Box.Visible = state and Settings.ESP.Enabled
+            end
+        end
+        -- Nếu bật lại và ESP đang enabled, refresh
+        if state and Settings.ESP.Enabled then
+            RefreshAllESP()
+        end
     end)
     
-    btnY = btnY + 32
+    btnY = btnY + 35
     
-    CreateToggle(MainFrame, "✨ Dịch chuyển mượt", btnY, 
-        Settings.Teleport.UseTween, function(state)
-        Settings.Teleport.UseTween = state
+    CreateToggle(MainFrame, "📏 Hiện Khoảng cách", btnY, 
+        Settings.ESP.Distance, function(state)
+        Settings.ESP.Distance = state
+        for _, data in pairs(ESPData) do
+            if data.DistanceTag then
+                data.DistanceTag.Visible = state and Settings.ESP.Enabled
+            end
+        end
+        if state and Settings.ESP.Enabled then
+            RefreshAllESP()
+        end
     end)
     
-    btnY = btnY + 42
+    btnY = btnY + 35
     
-    CreateButton(MainFrame, "📌 Thu nhỏ menu", btnY, 
-        Color3.fromRGB(220, 130, 40), function()
+    CreateToggle(MainFrame, "🎯 Chỉ người trốn", btnY, 
+        Settings.ESP.OnlyHiders, function(state)
+        Settings.ESP.OnlyHiders = state
+        if Settings.ESP.Enabled then
+            RefreshAllESP()
+        end
+    end)
+    
+    btnY = btnY + 35
+    
+    CreateToggle(MainFrame, "🗺️ Chỉ trong map", btnY, 
+        Settings.ESP.OnlyInGame, function(state)
+        Settings.ESP.OnlyInGame = state
+        if Settings.ESP.Enabled then
+            RefreshAllESP()
+        end
+    end)
+    
+    btnY = btnY + 45
+    
+    -- Nút thu nhỏ
+    local minimizeBtn = Instance.new("TextButton")
+    minimizeBtn.Size = UDim2.new(1, -16, 0, 30)
+    minimizeBtn.Position = UDim2.new(0, 8, 0, btnY)
+    minimizeBtn.BackgroundColor3 = Color3.fromRGB(220, 130, 40)
+    minimizeBtn.BorderSizePixel = 0
+    minimizeBtn.Text = "📌 Thu nhỏ menu"
+    minimizeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    minimizeBtn.TextSize = 13
+    minimizeBtn.Font = Enum.Font.GothamBold
+    minimizeBtn.AutoButtonColor = false
+    minimizeBtn.Parent = MainFrame
+    
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 5)
+    btnCorner.Parent = minimizeBtn
+    
+    minimizeBtn.MouseButton1Click:Connect(function()
         MinimizeMenu()
     end)
     
     return MenuGui
 end
 
--- Khởi tạo GUI
-print("Đang tạo GUI...")
+-- Khởi tạo
+print("Đang tạo ESP GUI...")
 MenuGui = CreateMenu()
 MinimizeButton = CreateMinimizedIcon()
-print("GUI đã tạo thành công!")
+print("ESP GUI đã tạo!")
 
--- Cập nhật info
+-- Tạo ESP cho tất cả player hiện tại
+for _, player in pairs(Players:GetPlayers()) do
+    if player ~= LocalPlayer and player.Character then
+        CreateESP(player)
+    end
+end
+
+-- Kết nối sự kiện
+Players.PlayerAdded:Connect(OnPlayerAdded)
+Players.PlayerRemoving:Connect(OnPlayerRemoving)
+
+-- Cập nhật player count
 coroutine.wrap(function()
-    while task.wait(0.8) do
-        pcall(UpdateTargetInfo)
+    while task.wait(1) do
+        pcall(UpdatePlayerCount)
     end
 end)()
+
+-- Refresh ESP khi LocalPlayer respawn
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    if Settings.ESP.Enabled then
+        RefreshAllESP()
+    end
+end)
 
 -- Keybind Delete
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -919,32 +787,21 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
--- Keybind ESC
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
-    if gameProcessed then return end
-    if input.KeyCode == Enum.KeyCode.Escape then
-        if PlayerListGui then
-            ClosePlayerList()
-        end
-    end
-end)
-
 -- Cleanup
 LocalPlayer.OnTeleport:Connect(function()
-    StopAutoTeleport()
-    ClosePlayerList()
+    ClearAllESP()
     if ScreenGui then ScreenGui:Destroy() end
     if MenuGui then MenuGui:Destroy() end
 end)
 
 -- Thông báo load
 task.wait(0.5)
-CreateNotification("🎯 Teleport Hider Loaded! [Delete] Menu", 3)
+CreateNotification("👁 ESP Hider Loaded! [Delete] Menu", 3)
 
 print("=================================")
-print("🎯 TELEPORT HIDER SCRIPT LOADED!")
-print("✅ Chỉ dịch chuyển đến người trốn trong map")
-print("❌ Không dịch chuyển đến người ở sảnh")
-print("❌ Không dịch chuyển đến đồng đội tìm")
+print("👁 ESP HIDER SCRIPT LOADED!")
+print("✅ Chỉ ESP người trốn trong map")
+print("✅ Box + Khoảng cách")
+print("✅ Tắt/Bật không lỗi")
 print("📋 Delete = Thu nhỏ/Mở Menu")
 print("=================================")
